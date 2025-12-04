@@ -632,8 +632,19 @@ class GameManager:
                             
                             # Format action name, using bet_amount to help determine correct label
                             # IMPORTANT: Use state_before_action to get correct Check vs Call label
+                            # CRITICAL FIX: For AI actions (player_id == 1), use the current game state
+                            # instead of reconstructed state_before_action to ensure AI actions are
+                            # properly labeled based on facing player bets (e.g., 4-bet vs 3-bet)
+                            context_state = state_before_action
+                            if player_id == 1:  # AI opponent
+                                # For AI actions, use current state which includes player's action
+                                # that AI is responding to. This ensures correct labeling like "4-bet to 15BB"
+                                # instead of "3-bet to 10BB" when facing a player 3-bet
+                                context_state = state
+                                logger.debug(f"Using current game state for AI action context (player {player_id})")
+
                             action_name = self._format_action_with_context(
-                                action, env, state_before_action, player_id, env.action_recorder[:i], bet_amount
+                                action, env, context_state, player_id, env.action_recorder[:i], bet_amount
                             )
                             game['action_history_with_cards'].append({
                                 'type': 'action',
@@ -1189,8 +1200,11 @@ class GameManager:
                             # If not facing a bet (preflop open), raise to 3BB total
                             if opponent_raised <= big_blind * 1.1:
                                 return 3 * big_blind
-                            # If facing a preflop raise (3BB open), 3bet to 10BB total
-                            elif opponent_raised > big_blind * 1.1:
+                            # If facing a 3-bet (> 10BB), 4bet to 25BB total
+                            elif opponent_raised > big_blind * 10:
+                                return 25 * big_blind
+                            # If facing a preflop raise (3BB open to ~10BB), 3bet to 10BB total
+                            else:
                                 return 10 * big_blind
             except Exception:
                 pass

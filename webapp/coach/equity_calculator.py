@@ -571,7 +571,7 @@ class EquityCalculator:
         
         # Handle new action label formats
         if 'raise to' in action_str or '3-bet to' in action_str or '4-bet to' in action_str:
-            # Extract BB amount from labels like "Raise to 3BB", "3-bet to 7BB", "4-bet to 15BB"
+            # Extract BB amount from labels like "Raise to 3BB", "3-bet to 7BB", "4-bet to 25BB"
             import re
             match = re.search(r'(\d+(?:\.\d+)?)\s*bb', action_str, re.IGNORECASE)
             if match:

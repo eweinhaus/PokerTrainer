@@ -1057,7 +1057,7 @@ class LLMOpponentAgent:
     
     def _build_system_prompt(self, opponent_position='big_blind'):
         """
-        Build concise system prompt that guides LLM to make GTO-optimal decisions.
+        Build system prompt that guides LLM to reason step-by-step before making decisions.
 
         Args:
             opponent_position (str): The opponent's position ('button' for SB, 'big_blind' for BB)
@@ -1069,17 +1069,25 @@ class LLMOpponentAgent:
 
         return f"""You are an expert NLHE poker player making GTO decisions.
 
+**Decision Process:**
+1. Analyze opponent range based on position, action history, and stack depth
+2. Assess your hand equity vs opponent range (if available)
+3. Evaluate pot odds and expected value
+4. Consider position and stack depth implications
+5. Select optimal action from legal options
+
 **Core Principles:**
 - Range-based thinking: Consider opponent ranges based on action history
-- Pot odds vs equity: Call when equity > pot odds
-- Position: You are {position_description} - {"be conservative" if opponent_position == 'big_blind' else "be aggressive"}
-- Stack depth: <20BB aggressive, >100BB more postflop play
+- Pot odds vs equity: Call when equity > pot odds, fold when equity < pot odds
+- Position: You are {position_description} - {"be conservative OOP" if opponent_position == 'big_blind' else "be aggressive IP"}
+- Stack depth: <20BB aggressive, 20-50BB balanced, >100BB more postflop play
 
 **Rules:**
+- ALWAYS provide detailed step-by-step reasoning first
 - ONLY select from legal actions provided
-- Use select_poker_action tool
+- Use select_poker_action tool with reasoning and action
 - Consider pre-calculated values (range, equity, pot odds)
-- Choose conservative action if unsure"""
+- Choose conservative action if analysis is unclear"""
     
     def _get_tool_calling_schema(self, legal_actions_labels=None, legal_actions=None):
         """
@@ -1130,17 +1138,17 @@ class LLMOpponentAgent:
                     "parameters": {
                         "type": "object",
                         "properties": {
+                            "reasoning": {
+                                "type": "string",
+                                "description": "REQUIRED: Detailed step-by-step analysis following the decision process: 1) Opponent range assessment 2) Equity evaluation 3) Pot odds analysis 4) Position/stack considerations 5) Strategic conclusion"
+                            },
                             "action_type": {
                                 "type": "string",
                                 "enum": base_actions,
-                                "description": description
-                            },
-                            "reasoning": {
-                                "type": "string",
-                                "description": "Optional brief reasoning"
+                                "description": description + " - Select this action based on your detailed reasoning above."
                             }
                         },
-                        "required": ["action_type"]
+                        "required": ["reasoning", "action_type"]
                     }
                 }
             }
@@ -1149,12 +1157,13 @@ class LLMOpponentAgent:
     def _call_llm_for_decision(self, context, retry_count=0):
         """
         Call LLM API with tool calling to get opponent decision.
+        LLM now provides detailed reasoning first, then selects action.
         Includes retry logic with exponential backoff.
-        
+
         Args:
             context (dict): Context dictionary
             retry_count (int): Current retry attempt (0 = first attempt)
-        
+
         Returns:
             str: Action string from LLM (e.g., "fold", "call", "raise_half_pot"), or None on failure
         """
@@ -1204,7 +1213,8 @@ class LLMOpponentAgent:
                             action_type = arguments.get("action_type")
                             reasoning = arguments.get("reasoning", "")
                             
-                            logger.info(f"LLM selected action: {action_type}, reasoning: {reasoning}")
+                            logger.info(f"LLM reasoning: {reasoning}")
+                            logger.info(f"LLM selected action: {action_type}")
                             return action_type
                 
                 logger.warning("LLM response did not contain valid tool call")
@@ -1301,7 +1311,7 @@ class LLMOpponentAgent:
         if rlcard_action not in legal_actions:
             # Fallback Priority (try alternatives before giving up):
             # 1. If raise_half_pot illegal but raise_pot legal → use raise_pot
-            if llm_action.lower() in ["raise_half_pot", "raise to 3 bb", "3-bet to 10 bb", "bet ½ pot"]:
+            if llm_action.lower() in ["raise_half_pot", "raise to 3 bb", "3-bet to 10 bb", "4-bet to 25 bb", "bet ½ pot"]:
                 if Action.RAISE_POT in legal_actions:
                     logger.info(f"LLM selected {llm_action} but RAISE_HALF_POT illegal, using RAISE_POT instead")
                     return Action.RAISE_POT

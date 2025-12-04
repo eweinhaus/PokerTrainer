@@ -236,16 +236,14 @@ class ActionLabeling:
                     labels['showRaisePot'] = False
                 elif betting_level == 1:
                     # Facing a 3-bet, show 4-bet option
-                    labels['raiseHalfPot'] = '4-bet to 15 BB'
-                    labels['raisePot'] = '4-bet to 15 BB'
+                    labels['raiseHalfPot'] = '4-bet to 25 BB'
+                    labels['raisePot'] = '4-bet to 25 BB'
                     labels['showRaisePot'] = False
                 else:
-                    # Facing 4-bet or higher, show one raise size
-                    bet_to_call = opponent_raised - player_raised
-                    raise_25x_total = bet_to_call * 2.5 + bet_to_call
-                    raise_25x_bb = round(raise_25x_total / big_blind)
-                    labels['raiseHalfPot'] = f'Raise to {raise_25x_bb} BB'
-                    labels['raisePot'] = f'Raise to {raise_25x_bb} BB'
+                    # Facing 4-bet or higher, only show fold/call/all-in (no 5-betting)
+                    labels['raiseHalfPot'] = 'All-In'
+                    labels['raisePot'] = 'All-In'
+                    labels['showRaiseHalfPot'] = False
                     labels['showRaisePot'] = False
             elif is_small_blind and is_first_to_act:
                 # Small blind opening (unopened pot, only blinds posted)
@@ -333,9 +331,9 @@ class ActionLabeling:
                 elif 9.5 <= bet_amount_bb <= 10.5:
                     # 3-bet to 10BB
                     return '3-bet to 10BB'
-                elif 14.5 <= bet_amount_bb <= 15.5:
-                    # 4-bet to 15BB
-                    return '4-bet to 15BB'
+                elif 24.5 <= bet_amount_bb <= 25.5:
+                    # 4-bet to 25BB
+                    return '4-bet to 25BB'
                 elif 17.5 <= bet_amount_bb <= 18.5:
                     # 4-bet to 18BB
                     return '4-bet to 18BB'
@@ -360,7 +358,7 @@ class ActionLabeling:
                 if betting_level == 0:
                     return '3-bet to 10BB'
                 elif betting_level == 1:
-                    return '4-bet to 15BB'
+                    return '4-bet to 25BB'
                 else:
                     bet_to_call = opponent_raised - player_raised
                     raise_25x_total = bet_to_call * 2.5 + bet_to_call

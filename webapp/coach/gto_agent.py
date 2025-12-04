@@ -190,7 +190,7 @@ class GTOAgent:
         # Determine action type based on betting sequence
         # Button open = 3BB total (opponent_raised = 3BB = 6 chips with BB=2)
         # 3-bet = 10BB total (opponent_raised = 10BB = 20 chips)
-        # 4-bet = 15-18BB total (opponent_raised = 15-18BB = 30-36 chips)
+        # 4-bet = 25BB total (opponent_raised = 25BB = 50 chips)
         
         # CRITICAL FIX: When raised array is [0, 0] but pot indicates a raise, infer from pot
         # Normal pot after button open = SB (1) + BB (2) + raise (6) = 9 chips = 4.5 BB
@@ -231,7 +231,7 @@ class GTOAgent:
             # FIXED: Use more precise thresholds to avoid misclassifying button opens as 3bets
             # Button open = 2.5-3BB (opponent_raised_bb = 2.5-3.0)
             # 3-bet = 7-10BB (opponent_raised_bb = 7-10)
-            # 4-bet = 15-18BB (opponent_raised_bb = 15-18)
+            # 4-bet = 25BB (opponent_raised_bb = 25)
             
             if opponent_raised_bb >= 15 or pot_bb >= 20:
                 # Facing a 4-bet (15BB+)

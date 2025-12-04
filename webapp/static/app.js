@@ -1367,14 +1367,11 @@ class PokerGame {
                 // Facing a button open (3BB) - we're making a 3-bet
                 bettingLevel = 0; // Open level (we're facing an open, making a 3-bet)
             } else if (opponentRaisedBB <= 12.0) {
-                // Facing a 3-bet (7-10BB) - we're making a 4-bet
+                // Facing a 3-bet (4-12BB) - we're making a 4-bet
                 bettingLevel = 1; // 3-bet level (we're facing a 3-bet, making a 4-bet)
-            } else if (opponentRaisedBB <= 25.0) {
-                // Facing a 4-bet (15-18BB) - we're making a 5-bet
-                bettingLevel = 2; // 4-bet level (we're facing a 4-bet, making a 5-bet)
             } else {
-                // Facing a 5-bet or higher
-                bettingLevel = 3; // 5-bet+ level
+                // Facing a 4-bet or higher (12BB+) - no 5-betting allowed
+                bettingLevel = 2; // 4-bet level (we're facing a 4-bet, no raise options)
             }
         }
         
@@ -1610,8 +1607,8 @@ class PokerGame {
                     labels.showRaisePot = false; // PREFLOP: Only show ONE bet size option
                 } else if (bettingLevel === 1) {
                     // Facing a 3-bet, show 4-bet option (only one size)
-                    labels.raiseHalfPot = '4-bet to 15 BB';
-                    labels.raisePot = '4-bet to 15 BB';
+                    labels.raiseHalfPot = '4-bet to 25 BB';
+                    labels.raisePot = '4-bet to 25 BB';
                     labels.showRaisePot = false; // PREFLOP: Only show ONE bet size option
                 } else {
                     // Facing 4-bet or higher, show one raise size

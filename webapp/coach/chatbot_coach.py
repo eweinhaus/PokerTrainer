@@ -62,8 +62,8 @@ class ChatbotCoach:
         self.model = "gpt-4-turbo-preview"  # Default model
         self.llm_provider = llm_provider
 
-        # Configure timeout for API calls (12 seconds to allow some buffer before 15s executor timeout)
-        self.api_timeout = 12.0
+        # Configure timeout for API calls (20 seconds for coach to handle complex analysis)
+        self.api_timeout = 20.0
 
         # Validate provider choice and initialize appropriate client
         if llm_provider == "openrouter":
@@ -281,7 +281,7 @@ Response style:
                     self._call_openai_api,
                     messages,
                     is_hand_analysis  # Pass flag for token adjustment
-                ).result(timeout=15.0)
+                ).result(timeout=21.0)
                 
                 # Extract response text
                 response_text = response.choices[0].message.content
@@ -296,7 +296,7 @@ Response style:
                 return formatted_response
                 
             except FutureTimeoutError:
-                error_msg = "OpenAI API call timed out after 15 seconds"
+                error_msg = f"OpenAI API call timed out after {self.api_timeout} seconds"
                 logger.warning(f"⚠️ {error_msg}")
                 # Try intelligent rule-based fallback first
                 rule_based_response = self._generate_rule_based_response(
@@ -361,8 +361,8 @@ Response style:
         max_retries = 2
         retry_delays = [1.0, 2.0]  # Exponential backoff: 1s, 2s
         
-        # Adjust max_tokens based on question type
-        max_tokens = 600 if is_hand_analysis else 200  # ~500 words for hand analysis, ~150 words for general
+        # Adjust max_tokens based on question type (conservative limits to prevent timeouts)
+        max_tokens = 400 if is_hand_analysis else 150  # ~300 words for hand analysis, ~110 words for general
         
         for attempt in range(max_retries + 1):
             try:
@@ -544,12 +544,12 @@ Response style:
                             break
                     
                     # If we found a preflop decision, get all decisions from that point forward
-                    # Limit to last 10 decisions to avoid overly long prompts (reduced from 15 for faster responses)
+                    # Limit to last 5 decisions to avoid overly long prompts (reduced for faster responses)
                     if last_preflop_index is not None:
                         most_recent_hand_decisions = hand_history[last_preflop_index:]
-                        # Limit to last 10 decisions to keep prompt size manageable and improve response time
-                        if len(most_recent_hand_decisions) > 10:
-                            most_recent_hand_decisions = most_recent_hand_decisions[-10:]
+                        # Limit to last 5 decisions to keep prompt size manageable and improve response time
+                        if len(most_recent_hand_decisions) > 5:
+                            most_recent_hand_decisions = most_recent_hand_decisions[-5:]
                     else:
                         # If no preflop found, just get the last 10 decisions (likely from current hand)
                         most_recent_hand_decisions = hand_history[-10:] if len(hand_history) > 10 else hand_history
@@ -568,177 +568,44 @@ Response style:
                     if player_decisions:
                         context_parts.append("\nMost Recent Hand:")
 
-                        # Show all player decisions in the hand
+                        # Show all player decisions in the hand (concise but informative format)
+                        # Include hole cards for first decision and final board for last decision
                         for j, decision in enumerate(player_decisions, 1):
                             try:
                                 action = decision.get('action', 'Unknown')
                                 stage = decision.get('stage', 0)
                                 hand_cards = decision.get('hand', [])
                                 board_cards = decision.get('public_cards', [])
-                                pot = decision.get('pot', 0)
 
-                                # Convert numpy types to Python native types
+                                # Convert numpy types and map to readable format
                                 action = self._convert_numpy_type(action)
                                 stage = self._convert_numpy_type(stage)
-                                pot = self._convert_numpy_type(pot)
 
-                                # Map action to readable format
-                                action_map = {
-                                    0: "Fold",
-                                    1: "Check/Call",
-                                    2: "Raise ½ Pot",
-                                    3: "Raise Pot",
-                                    4: "All-In"
-                                }
-                                # Handle both int and string actions
-                                if isinstance(action, str):
-                                    try:
-                                        action = int(action)
-                                    except:
-                                        pass
-                                # Convert to int if possible (already converted numpy types)
-                                try:
-                                    action_int = int(action) if isinstance(action, (int, float)) else action
-                                except (ValueError, TypeError):
-                                    action_int = action
-                                
-                                # Create action_name safely
-                                try:
-                                    action_name = action_map.get(action_int, "Action " + str(action))
-                                except Exception as e:
-                                    logger.warning(f"Error creating action_name for decision {j}: {e}")
-                                    action_name = "Unknown Action"
-                                
-                                # Map stage to readable format
-                                stage_map = {
-                                    0: "Preflop",
-                                    1: "Flop",
-                                    2: "Turn",
-                                    3: "River"
-                                }
-                                # Handle both int and string stages
-                                if isinstance(stage, str):
-                                    try:
-                                        stage = int(stage)
-                                    except:
-                                        pass
-                                # Convert to int if possible (already converted numpy types)
-                                try:
-                                    stage_int = int(stage) if isinstance(stage, (int, float)) else stage
-                                except (ValueError, TypeError):
-                                    stage_int = stage
-                                
-                                # Create stage_name safely
-                                try:
-                                    stage_name = stage_map.get(stage_int, "Stage " + str(stage))
-                                except Exception as e:
-                                    logger.warning(f"Error creating stage_name for decision {j}: {e}")
-                                    stage_name = "Unknown Stage"
-                                
+                                action_map = {0: "Fold", 1: "Check/Call", 2: "Raise", 3: "Raise", 4: "All-In"}
+                                stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
+
+                                action_name = action_map.get(int(action) if isinstance(action, (int, float)) else action, f"Action {action}")
+                                stage_name = stage_map.get(int(stage) if isinstance(stage, (int, float)) else stage, f"Stage {stage}")
+
                                 # Format cards
-                                try:
-                                    hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
-                                except Exception as e:
-                                    logger.warning(f"Error formatting hand cards for decision {j}: {e}")
-                                    hand_str = "Unknown"
-                                
-                                try:
-                                    board_str = self._format_cards(board_cards) if board_cards else "No board"
-                                except Exception as e:
-                                    logger.warning(f"Error formatting board cards for decision {j}: {e}")
-                                    board_str = "No board"
-                                
-                                # Convert pot to int for display (already converted numpy types)
-                                try:
-                                    pot_display = int(pot) if isinstance(pot, (int, float)) else pot
-                                except (ValueError, TypeError):
-                                    pot_display = pot
-                                
-                                # Get bet amount if available
-                                bet_amount = decision.get('bet_amount', 0)
-                                big_blind_hist = decision.get('big_blind', 2)
-                                bet_info = ""
-                                if bet_amount and big_blind_hist > 0:
-                                    try:
-                                        bet_bb = float(bet_amount) / float(big_blind_hist)
-                                        # Format to 1 decimal place using round and string conversion
-                                        bet_bb_rounded = round(bet_bb, 1)
-                                        bet_info = ", Bet: " + str(bet_bb_rounded) + " BB"
-                                    except (ValueError, TypeError, ZeroDivisionError) as e:
-                                        logger.debug("Error creating bet_info for decision " + str(j) + ": " + str(e))
-                                        bet_info = ""
-                                
-                                # Get stack info if available
-                                stack_info = ""
-                                all_chips_hist = decision.get('all_chips', [0, 0])
-                                if all_chips_hist and len(all_chips_hist) >= 2 and big_blind_hist > 0:
-                                    try:
-                                        player_chips_hist = float(all_chips_hist[0]) if len(all_chips_hist) > 0 else 0.0
-                                        opponent_chips_hist = float(all_chips_hist[1]) if len(all_chips_hist) > 1 else 0.0
-                                        effective_stack = min(player_chips_hist, opponent_chips_hist)
-                                        effective_stack_bb = effective_stack / float(big_blind_hist)
-                                        # Format to 1 decimal place using round and string conversion
-                                        effective_stack_bb_rounded = round(effective_stack_bb, 1)
-                                        stack_info = ", Effective Stack: " + str(effective_stack_bb_rounded) + " BB"
-                                        
-                                        # Calculate SPR if pot > 0
-                                        if pot_display and isinstance(pot_display, (int, float)) and float(pot_display) > 0:
-                                            spr = effective_stack / float(pot_display)
-                                            spr_rounded = round(spr, 1)
-                                            stack_info += ", SPR: " + str(spr_rounded)
-                                    except (ValueError, TypeError, ZeroDivisionError) as e:
-                                        logger.debug("Error creating stack_info for decision " + str(j) + ": " + str(e))
-                                        stack_info = ""
-                                
-                                # Ensure all values are strings to avoid formatting errors
-                                # Convert everything to plain strings to avoid nested f-string issues
-                                pot_str = str(pot_display) if pot_display is not None else "0"
-                                hand_str_safe = str(hand_str) if hand_str else "Unknown"
-                                board_str_safe = str(board_str) if board_str else "No board"
-                                stage_name_safe = str(stage_name) if stage_name else "Unknown"
-                                action_name_safe = str(action_name) if action_name else "Unknown"
-                                bet_info_safe = str(bet_info) if bet_info else ""
-                                stack_info_safe = str(stack_info) if stack_info else ""
-                                
-                                # Use simple string concatenation to avoid any format string interpretation issues
-                                # This is the safest approach when dealing with potentially problematic string values
-                                try:
-                                    decision_text = (
-                                        "  " + str(j) + ". " + str(stage_name_safe) + ": " + str(action_name_safe) + 
-                                        " (Your hand: " + str(hand_str_safe) + ", Board: " + str(board_str_safe) + 
-                                        ", Pot: " + str(pot_str) + str(bet_info_safe) + str(stack_info_safe) + ")"
-                                    )
-                                    context_parts.append(decision_text)
-                                except Exception as format_error:
-                                    # Last resort fallback - minimal formatting
-                                    logger.warning("Error formatting decision " + str(j) + ": " + str(format_error))
-                                    try:
-                                        log_vals = (
-                                            "Problematic values - stage: " + repr(stage_name_safe) + 
-                                            ", action: " + repr(action_name_safe) + ", hand: " + repr(hand_str_safe) + 
-                                            ", board: " + repr(board_str_safe) + ", pot: " + repr(pot_str) + 
-                                            ", bet_info: " + repr(bet_info_safe) + ", stack_info: " + repr(stack_info_safe)
-                                        )
-                                        logger.warning(log_vals)
-                                    except:
-                                        pass
-                                    # Minimal safe fallback using string concatenation
-                                    try:
-                                        decision_text = "  " + str(j) + ". Decision: " + str(action_name_safe) + " at " + str(stage_name_safe)
-                                        context_parts.append(decision_text)
-                                    except Exception as e2:
-                                        logger.error("Even minimal formatting failed for decision " + str(j) + ": " + str(e2))
-                                        context_parts.append("  " + str(j) + ". Decision: " + str(decision))
+                                hand_str = self._format_cards(hand_cards) if hand_cards else ""
+                                board_str = self._format_cards(board_cards) if board_cards else ""
+
+                                # Build decision text
+                                if j == 1 and hand_str:
+                                    # First decision: include hole cards
+                                    decision_text = f"  {j}. {stage_name}: {action_name} (Hand: {hand_str})"
+                                elif j == len(player_decisions) and board_str:
+                                    # Last decision: include final board
+                                    decision_text = f"  {j}. {stage_name}: {action_name} (Board: {board_str})"
+                                else:
+                                    # Middle decisions: just action
+                                    decision_text = f"  {j}. {stage_name}: {action_name}"
+
+                                context_parts.append(decision_text)
                             except Exception as e:
-                                import traceback
-                                error_trace = traceback.format_exc()
-                                logger.warning("Error formatting decision " + str(j) + ": " + str(e))
-                                logger.warning("Traceback: " + error_trace)
-                                # Include decision in raw format as fallback
-                                try:
-                                    context_parts.append("  " + str(j) + ". Decision: " + str(decision))
-                                except:
-                                    context_parts.append("  " + str(j) + ". Decision: [Error displaying decision]")
+                                logger.warning(f"Error formatting decision {j}: {e}")
+                                context_parts.append(f"  {j}. Decision: {decision.get('action', 'Unknown')}")
                         hand_history_added = True
                     else:
                         # Fallback: show recent decisions without filtering by hand
@@ -866,10 +733,14 @@ Response style:
                 return None
         
         result = "\n".join(context_parts)
-        
-        # Limit total context size to prevent overly long prompts (max 3000 chars)
+
+        # Log the context being sent for debugging
+        logger.debug(f"Coach context built: {len(result)} chars")
+        logger.debug(f"Context content:\n{result}")
+
+        # Limit total context size to prevent overly long prompts (max 2000 chars)
         # This helps prevent timeout issues with very large prompts
-        max_context_length = 3000
+        max_context_length = 2000
         if len(result) > max_context_length:
             logger.warning(f"Context too long ({len(result)} chars), truncating to {max_context_length} chars")
             result = result[:max_context_length] + "\n... (context truncated for performance)"
