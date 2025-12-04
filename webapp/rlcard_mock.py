@@ -69,8 +69,8 @@ class MockEnvironment:
                 'all_chips': self.game_state['all_chips'],
                 'raised': self.game_state['raised'],
                 'stage': self.game_state['stage'],
-                'legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN],
-                'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
+                'legal_actions': [0, 1, 2, 3, 4],
+                'raw_legal_actions': [0, 1, 2, 3, 4]
             },
             'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
         }
@@ -118,12 +118,16 @@ class MockEnvironment:
                 'all_chips': self.game_state['all_chips'],
                 'raised': self.game_state['raised'],
                 'stage': self.game_state['stage'],
-                'legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN],
-                'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
+                'legal_actions': [0, 1, 2, 3, 4],
+                'raw_legal_actions': [0, 1, 2, 3, 4]
             },
             'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
         }
         return state, opponent
+
+    def get_legal_actions(self):
+        """Return legal actions for current state"""
+        return [0, 1, 2, 3, 4]  # FOLD, CHECK_CALL, RAISE_HALF_POT, RAISE_POT, ALL_IN
 
     def is_over(self):
         """Check if game is over (mock - always return False for now)"""
@@ -140,8 +144,8 @@ class MockEnvironment:
                 'all_chips': self.game_state['all_chips'],
                 'raised': self.game_state['raised'],
                 'stage': self.game_state['stage'],
-                'legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN],
-                'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
+                'legal_actions': [0, 1, 2, 3, 4],
+                'raw_legal_actions': [0, 1, 2, 3, 4]
             },
             'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
         }

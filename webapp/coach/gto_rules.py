@@ -165,6 +165,48 @@ class GTORules:
             'TT': 'raise',
             'AQs': 'raise', 'AQo': 'raise',
         }
+
+        # Small blind opening range for HUNL - Mixed strategy approach
+        # Based on specific frequency requirements for optimal GTO play
+        self.sb_opening_range_100bb = {
+            # 100% raise: All pocket pairs (22-AA)
+            '22': 'raise', '33': 'raise', '44': 'raise', '55': 'raise', '66': 'raise',
+            '77': 'raise', '88': 'raise', '99': 'raise', 'TT': 'raise', 'JJ': 'raise',
+            'QQ': 'raise', 'KK': 'raise', 'AA': 'raise',
+
+            # 100% raise: All suited hands
+            '32s': 'raise', '42s': 'raise', '43s': 'raise', '52s': 'raise', '53s': 'raise',
+            '54s': 'raise', '62s': 'raise', '63s': 'raise', '64s': 'raise', '65s': 'raise',
+            '72s': 'raise', '73s': 'raise', '74s': 'raise', '75s': 'raise', '76s': 'raise',
+            '82s': 'raise', '83s': 'raise', '84s': 'raise', '85s': 'raise', '86s': 'raise', '87s': 'raise',
+            '92s': 'raise', '93s': 'raise', '94s': 'raise', '95s': 'raise', '96s': 'raise', '97s': 'raise', '98s': 'raise',
+            'T2s': 'raise', 'T3s': 'raise', 'T4s': 'raise', 'T5s': 'raise', 'T6s': 'raise', 'T7s': 'raise', 'T8s': 'raise', 'T9s': 'raise',
+            'J2s': 'raise', 'J3s': 'raise', 'J4s': 'raise', 'J5s': 'raise', 'J6s': 'raise', 'J7s': 'raise', 'J8s': 'raise', 'J9s': 'raise', 'JTs': 'raise',
+            'Q2s': 'raise', 'Q3s': 'raise', 'Q4s': 'raise', 'Q5s': 'raise', 'Q6s': 'raise', 'Q7s': 'raise', 'Q8s': 'raise', 'Q9s': 'raise', 'QJs': 'raise', 'QTs': 'raise',
+            'K2s': 'raise', 'K3s': 'raise', 'K4s': 'raise', 'K5s': 'raise', 'K6s': 'raise', 'K7s': 'raise', 'K8s': 'raise', 'K9s': 'raise', 'KJs': 'raise', 'KQs': 'raise', 'KTs': 'raise',
+            'A2s': 'raise', 'A3s': 'raise', 'A4s': 'raise', 'A5s': 'raise', 'A6s': 'raise', 'A7s': 'raise', 'A8s': 'raise', 'A9s': 'raise', 'AJs': 'raise', 'AQs': 'raise', 'AKs': 'raise', 'ATs': 'raise',
+
+            # 100% raise: All hands with Ace (offsuit ones not covered by suited rule above)
+            'A2o': 'raise', 'A3o': 'raise', 'A4o': 'raise', 'A5o': 'raise', 'A6o': 'raise',
+            'A7o': 'raise', 'A8o': 'raise', 'A9o': 'raise', 'AJo': 'raise', 'AQo': 'raise',
+            'AKo': 'raise', 'ATo': 'raise',
+
+            # 100% raise: All other broadway offsuit hands not covered above
+            'KJo': 'raise', 'KQo': 'raise', 'KTo': 'raise',
+            'QJo': 'raise', 'QTo': 'raise',
+            'JTo': 'raise',
+
+            # Mixed strategy hands (frequency-based)
+            'T3o': 0.85,  # Raise 85% of the time
+            '94o': 0.8,   # Raise 80% of the time
+            '43o': 0.7,   # Raise 70% of the time
+            '53o': 0.7,   # Raise 70% of the time
+            '63o': 0.7,   # Raise 70% of the time
+
+            # 100% fold: Specific low offsuit hands
+            '32o': 'fold', '42o': 'fold', '52o': 'fold', '62o': 'fold', '72o': 'fold',
+            '73o': 'fold', '82o': 'fold', '83o': 'fold', '92o': 'fold', '93o': 'fold', 'T2o': 'fold',
+        }
         
         # Button vs big blind 3-bet defending range
         self.button_defending_3bet_range = {
@@ -458,7 +500,10 @@ class GTORules:
         
         if position == 'button':
             if action_type == 'open':
-                if category == '20_30':
+                # Use SB opening range for button opening (HUNL SB opening)
+                if category == '100':
+                    return self.sb_opening_range_100bb
+                elif category == '20_30':
                     return self.button_opening_range_20_30bb
                 elif category == '50':
                     return self.button_opening_range_50bb

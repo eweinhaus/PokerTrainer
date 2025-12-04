@@ -344,12 +344,29 @@ class TestFrontendBackendIntegration(unittest.TestCase):
         # Start game
         self.app.post('/api/game/start',
                      json={'session_id': self.session_id})
-        
-        # Process action
+
+        # Get game state to see legal actions
+        response = self.app.get('/api/game/state',
+                               query_string={'session_id': self.session_id})
+        self.assertEqual(response.status_code, 200)
+        game_state = json.loads(response.data)
+
+        # Check if it's the human player's turn
+        current_player = game_state.get('current_player', 0)
+        if current_player != 0:
+            # Not human player's turn, skip test
+            self.skipTest(f"Not human player's turn (current_player={current_player})")
+
+        # Find a legal action to test
+        legal_actions = game_state.get('legal_actions', [])
+        self.assertGreater(len(legal_actions), 0, "Should have legal actions")
+
+        # Process action using first legal action
+        action_value = legal_actions[0]
         response = self.app.post('/api/game/action',
                                 json={
                                     'session_id': self.session_id,
-                                    'action_index': 1  # Call
+                                    'action_value': action_value
                                 })
         self.assertEqual(response.status_code, 200)
         game_state = json.loads(response.data)

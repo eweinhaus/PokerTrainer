@@ -1,0 +1,177 @@
+Description: Action labeling consolidation patterns and preferences
+Globs: webapp/coach/action_labeling.py, webapp/tests/test_action_consistency.py
+
+## Action Labeling Consolidation Rules
+
+### Core Principles
+- **Single Source of Truth**: All action labeling logic must come from `ActionLabeling` module
+- **Context-Aware Labels**: Button labels must adapt to game context (preflop/postflop, position, betting level)
+- **Consistency Across Components**: Frontend, backend, and LLM must use identical labeling logic
+- **Performance First**: All labeling operations must complete in < 50ms
+
+### Implementation Patterns
+
+#### 1. Context Detection Priority
+```python
+# Always check game stage first
+if context['is_preflop']:
+    # Handle preflop scenarios
+else:
+    # Handle postflop scenarios
+
+# Then check position and facing bet status
+if context['is_facing_bet']:
+    # Show "Call" or "Raise to X BB"
+else:
+    # Show "Check" or "Bet X Pot"
+```
+
+#### 2. Action Value vs Action Index
+```python
+# ✅ CORRECT: Send action_value directly
+response = client.post('/api/game/action', json={
+    'session_id': session_id,
+    'action_value': action_value  # Direct value, not calculated index
+})
+
+# ❌ WRONG: Calculate action index
+action_index = legal_actions.index(action_value)
+```
+
+#### 3. Turn Validation
+```python
+# Always validate whose turn it is before processing actions
+current_player = game['current_player']
+if current_player != 0:  # 0 = human player
+    return jsonify({'error': 'Not your turn to act'})
+```
+
+#### 4. Context-Aware Label Mapping
+
+**Preflop Scenarios:**
+- Small Blind First: "3-bet to 10 BB" (when facing BB bet)
+- Big Blind Facing Open: "3-bet to 10 BB"
+- Facing 3-bet: "4-bet to 15 BB"
+- Facing 4-bet+: "Raise to 28 BB" (calculated)
+
+**Postflop Scenarios:**
+- First to Act: "Bet ½ Pot", "Bet ⅔ Pot"
+- Facing Bet: "Raise to 18 BB", "Raise to 20 BB" (2.5x and 3x)
+
+#### 5. Error Handling Patterns
+```python
+# Graceful fallbacks for API failures
+try:
+    labels = ActionLabeling.get_button_labels(context)
+except Exception as e:
+    logger.warning(f"ActionLabeling failed: {e}")
+    labels = get_fallback_labels()  # Local calculation fallback
+```
+
+### Testing Requirements
+
+#### Unit Tests
+- Test all 6 action contexts independently
+- Mock game states for consistent testing
+- Verify label accuracy for each scenario
+- Test error conditions and fallbacks
+
+#### Integration Tests
+- Test API endpoint responses
+- Verify frontend/backend consistency
+- Test LLM opponent label usage
+- Validate performance requirements
+
+#### Context Scenarios to Test
+1. Preflop Small Blind (facing BB bet)
+2. Preflop Big Blind facing open
+3. Preflop facing 3-bet
+4. Preflop facing 4-bet+
+5. Postflop first to act
+6. Postflop facing bet
+
+### Code Organization
+
+#### Module Structure
+```
+coach/
+├── action_labeling.py     # Core labeling logic
+├── action_validator.py    # Validation layer
+├── __init__.py           # Module exports
+```
+
+#### API Endpoints
+- `/api/game/button-labels` - Returns context-aware labels
+- `/api/game/action` - Processes actions with validation
+- `/api/game/state` - Returns game state for context
+
+### Performance Targets
+- Action labeling: < 1ms
+- Button label API: < 5ms
+- Action processing: < 50ms
+- State retrieval: < 5ms
+
+### Maintenance Guidelines
+
+#### When Adding New Contexts
+1. Update `get_context_from_state()` to detect new scenario
+2. Add label logic to `get_button_labels()`
+3. Update tests for new context
+4. Verify all components (frontend/backend/LLM) use new labels
+
+#### When Modifying Labels
+1. Change logic in `ActionLabeling` module only
+2. Update tests to match new expected labels
+3. Verify frontend fallbacks work
+4. Test all 6 contexts still work
+
+#### When Adding New Components
+1. Import `ActionLabeling` module
+2. Use `get_context_from_state()` for context detection
+3. Use appropriate labeling method for component needs
+4. Add component-specific tests
+
+### Anti-Patterns to Avoid
+
+#### ❌ Hardcoded Labels
+```python
+# DON'T DO THIS
+if facing_bet:
+    return "Call"
+else:
+    return "Check"
+```
+
+#### ✅ Centralized Logic
+```python
+# DO THIS INSTEAD
+context = ActionLabeling.get_context_from_state(game_state)
+labels = ActionLabeling.get_button_labels(context)
+return labels['checkCall']  # Will be "Check" or "Call" based on context
+```
+
+#### ❌ Index Calculations
+```python
+# DON'T DO THIS
+action_index = legal_actions.index(desired_action)
+```
+
+#### ✅ Direct Values
+```python
+# DO THIS INSTEAD
+action_value = desired_action  # Send value directly
+```
+
+### Quality Assurance
+
+#### Pre-Commit Checks
+- All 6 contexts tested
+- Performance within targets
+- No hardcoded labels
+- Consistent error handling
+
+#### Code Review Criteria
+- Uses ActionLabeling module
+- Follows established patterns
+- Includes appropriate tests
+- Maintains performance targets

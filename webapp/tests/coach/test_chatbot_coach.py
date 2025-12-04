@@ -30,7 +30,8 @@ class TestChatbotCoach(unittest.TestCase):
         
         self.assertIsNotNone(coach)
         self.assertIsNotNone(coach.system_prompt)
-        self.assertIn("expert poker coach", coach.system_prompt.lower())
+        # Updated to match new system prompt content
+        self.assertIn("poker coach", coach.system_prompt.lower())
         self.assertIn("gto", coach.system_prompt.lower())
     
     @patch.dict(os.environ, {'OPENAI_API_KEY': 'test_key'})

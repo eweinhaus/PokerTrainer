@@ -108,23 +108,33 @@ class GTOAgent:
     def _get_position(self, raw_obs):
         """
         Determine position from raw observation.
-        
+
         In RLCard heads-up:
         - Player 0 is button (posts small blind, acts first preflop)
         - Player 1 is big blind (posts big blind, acts second preflop)
-        
+
         Since this agent is used as the opponent (second agent in env.set_agents),
-        we are always player 1 (big blind).
-        
+        we are always player 1, but our position depends on dealer button.
+
         Args:
             raw_obs (dict): Raw observation from RLCard
-        
+
         Returns:
             str: "button" or "big_blind"
         """
-        # We are always player 1 (big blind) since we're the opponent agent
-        # Player 0 is the human player (button)
-        return 'big_blind'
+        # We are player 1 (opponent), so check dealer_id to determine our position
+        # In heads-up poker, dealer is BB, non-dealer is SB (button)
+        dealer_id = raw_obs.get('dealer_id')
+        if dealer_id is not None:
+            if dealer_id == 1:
+                # We (player 1) are dealer, so we are BB
+                return 'big_blind'
+            else:
+                # User (player 0) is dealer, so we (player 1) are SB (button)
+                return 'button'
+        else:
+            # Fallback: assume we are big blind if no dealer_id
+            return 'big_blind'
     
     def _get_stack_depth(self, raw_obs):
         """
@@ -201,21 +211,18 @@ class GTOAgent:
         
         # Check if button has raised by looking at both raised amount AND pot size
         button_has_raised = opponent_raised > big_blind * 1.1 or pot_bb >= 4.0
-        
-        # CRITICAL FIX: Big blind should NEVER "open" - they can only check or defend
-        # If pot is just blinds (3 chips = 1.5BB) and raised=[0,0], button has checked
-        # In this case, big blind should check (not open)
-        # If button has raised, we're defending (not opening)
+
+        # Determine our position to decide if we can open
+        our_position = self._get_position(raw_obs)
+
         if not button_has_raised:
-            # Button hasn't raised - check if this is just blinds or button checked
-            if pot_bb <= 2.0:
-                # Just blinds posted - button will act first, we shouldn't be acting yet
-                # But if we are acting, button must have checked, so we should check too
-                # Return 'defend' with call action (which becomes check)
-                return 'defend'
+            # No one has raised yet
+            if our_position == 'button':
+                # We are button (SB) - this is an opening scenario
+                return 'open'
             else:
-                # This shouldn't happen, but if pot > 2BB and no raise, something is wrong
-                # Default to defend to be safe
+                # We are big blind - button hasn't raised, so they must have checked
+                # We should check too (defend scenario with check action)
                 return 'defend'
         elif our_raised <= big_blind * 1.1:
             # Opponent raised, we haven't - determine if we're facing open, 3-bet, or 4-bet

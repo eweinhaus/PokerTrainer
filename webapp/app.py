@@ -12,6 +12,7 @@ import numpy as np
 try:
     import rlcard
     from rlcard.agents import RandomAgent
+    from rlcard.games.nolimitholdem.round import Action
 except ImportError:
     # Use mock implementation when rlcard is not available
     import sys
@@ -19,6 +20,7 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(__file__))
     import rlcard_mock as rlcard
     from rlcard_mock.agents import RandomAgent
+    from rlcard_mock import Action
 
 # Load environment variables from .env file (optional)
 try:
@@ -29,6 +31,8 @@ except Exception as e:
     print("Environment variables should be set manually or through other means")
 
 from coach.strategy_evaluator import StrategyEvaluator
+from coach.action_labeling import ActionLabeling
+from coach.action_validator import ActionValidator
 from coach.chatbot_coach import ChatbotCoach
 from coach.gto_agent import GTOAgent
 from coach.llm_opponent_agent import LLMOpponentAgent
@@ -323,8 +327,37 @@ class GameManager:
                         # If still no value, skip this action (don't add 0 as fallback)
             return result
         
-        legal_actions = convert_actions(raw_obs.get('legal_actions', []))
-        raw_legal_actions = convert_actions(raw_obs.get('raw_legal_actions', []))
+        # Get legal actions - try real RLCard location first (top level of state), then mock location (raw_obs)
+        legal_actions = convert_actions(state.get('legal_actions', raw_obs.get('legal_actions', [])))
+        raw_legal_actions = convert_actions(state.get('raw_legal_actions', raw_obs.get('raw_legal_actions', [])))
+
+        # Fallback: If no legal actions in state, try to get them from environment
+        if not raw_legal_actions:
+            if hasattr(env, 'get_legal_actions'):
+                try:
+                    env_legal_actions = env.get_legal_actions()
+                    raw_legal_actions = convert_actions(env_legal_actions)
+                    legal_actions = raw_legal_actions.copy()
+                    logger.debug(f"Got legal actions from env.get_legal_actions(): {raw_legal_actions}")
+                except Exception as e:
+                    logger.warning(f"Failed to get legal actions from environment: {e}")
+
+            # Last resort: Provide basic poker actions if still no legal actions
+            if not raw_legal_actions:
+                logger.warning(f"No legal actions found in state or environment, using default poker actions for session {session_id}")
+                # Basic poker actions: Fold, Check/Call, Raise Half Pot, Raise Pot, All-in
+                raw_legal_actions = [0, 1, 2, 3, 4]
+                legal_actions = [0, 1, 2, 3, 4]
+            else:
+                # Ensure basic actions are always available as fallback
+                basic_actions = [0, 1, 4]  # Fold, Check/Call, All-in should always be available
+                for action in basic_actions:
+                    if action not in legal_actions:
+                        legal_actions.append(action)
+                        logger.debug(f"Added basic action {action} to legal_actions")
+                    if action not in raw_legal_actions:
+                        raw_legal_actions.append(action)
+                        logger.debug(f"Added basic action {action} to raw_legal_actions")
 
         # Convert stage enum to integer if needed
         stage = raw_obs.get('stage', 0)
@@ -345,15 +378,15 @@ class GameManager:
 
         # Fix for small blind first to act preflop - ensure standard raise options are available
         if (stage == 0 and  # Preflop
-            current_player == 0 and  # Human player (small blind in heads-up)
+            current_player == 0 and  # Human player
             not env.is_over() and
-            button_id == 0):  # Small blind is first to act
+            button_id == 0):  # Human is SB (button_id represents SB position)
 
             # Small blind should always be able to make standard preflop raises
             # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
-            if 2 not in legal_actions:  # RAISE_HALF_POT (Raise to 3 BB)
+            if 2 not in legal_actions and 3 in legal_actions:  # RAISE_HALF_POT (Raise to 3 BB) only if RAISE_POT is available
                 legal_actions.append(2)
-            if 2 not in raw_legal_actions:
+            if 2 not in raw_legal_actions and 3 in raw_legal_actions:
                 raw_legal_actions.append(2)
         
         # Get in_chips from players (amount each player has bet in current hand)
@@ -403,6 +436,7 @@ class GameManager:
             game['action_history_with_cards'] = []
             game['last_action_count'] = 0
             game['blinds_added'] = False
+            game['last_processed_stage'] = 0  # Track last processed stage to detect transitions
         
         try:
             # Get current stage and public cards
@@ -486,10 +520,40 @@ class GameManager:
                 # Add new actions to cumulative history
                 last_action_count = game.get('last_action_count', 0)
                 if current_action_count > last_action_count:
+                    # Get the stage when the last action was processed to detect stage transitions
+                    last_processed_stage = game.get('last_processed_stage', current_stage)
+                    
                     for i in range(last_action_count, current_action_count):
                         action_record = env.action_recorder[i]
                         if len(action_record) >= 2:
                             player_id, action = action_record[0], action_record[1]
+                            
+                            # CRITICAL FIX: Skip actions that appear to be automatic/internal RLCard actions
+                            # These can occur during stage transitions (preflop -> postflop) when RLCard
+                            # automatically processes state changes. We only want to record actions that
+                            # were actually initiated by the user or AI through our process_action/process_ai_turn methods.
+                            
+                            # Get current player from game state to validate actions
+                            current_player = game.get('current_player', None)
+                            
+                            # Check if this action is for player 0 (human) and if we're in a stage transition
+                            # If we just transitioned to postflop and this is player 0's action, it might be
+                            # an automatic action that shouldn't be recorded
+                            if player_id == 0 and last_processed_stage == 0 and current_stage > 0:
+                                # We just transitioned from preflop to postflop
+                                # Check if this action is a CHECK_CALL that might be automatic
+                                action_value = action.value if hasattr(action, 'value') else action
+                                if action_value == 1:  # CHECK_CALL
+                                    # This might be an automatic action - check if it's actually valid
+                                    # by verifying the current player state
+                                    # In heads-up postflop, BB acts first. If we just transitioned to postflop
+                                    # and current_player is not 0, then player 0 shouldn't have acted yet
+                                    if current_player is not None and current_player != player_id:
+                                        # The current player doesn't match - this action might be stale/automatic
+                                        # This happens when RLCard records an internal state transition as an action
+                                        logger.warning(f"⚠️ [ACTION_HISTORY] Skipping potentially automatic action for P{player_id} during stage transition - Current player: {current_player}, Action: {action}, Stage: {current_stage}")
+                                        continue
+                            
                             # Reconstruct the state BEFORE this action was taken
                             # This ensures action labels are correct based on the context at that time
                             state_before_action = self._reconstruct_state_before_action(
@@ -499,15 +563,72 @@ class GameManager:
                             state_after_action = self._reconstruct_state_after_action(
                                 env, state, env.action_recorder[:i+1], i+1
                             )
-                            # Get bet amount from state after action (more accurate)
-                            bet_amount = self._get_bet_amount_from_state(action, env, player_id, state_after_action)
                             
-                            # If bet_amount is still 0, try calculating it directly
+                            # CRITICAL FIX: Get the stage when this action actually occurred, not the current stage
+                            # The current_stage might be from a later betting round (e.g., Turn) when we're
+                            # building history for a Flop action
+                            action_stage = current_stage  # Default to current stage
+                            if state_before_action and 'raw_obs' in state_before_action:
+                                action_stage_raw = state_before_action['raw_obs'].get('stage', current_stage)
+                                if hasattr(action_stage_raw, 'value'):
+                                    action_stage = action_stage_raw.value
+                                elif isinstance(action_stage_raw, int):
+                                    action_stage = action_stage_raw
+                                elif action_stage_raw:
+                                    try:
+                                        action_stage = int(action_stage_raw)
+                                    except:
+                                        action_stage = current_stage
+                            
+                            # CRITICAL FIX: Calculate bet amount appropriately based on action type
+                            # For raises: use total amount raised TO (ActionLabeling expects this)
+                            # For calls: use the difference (amount to call)
+                            # For checks: use 0
+                            action_value_for_check = action.value if hasattr(action, 'value') else (action if isinstance(action, int) else 1)
+                            bet_amount = 0
+                            if state_before_action and state_after_action:
+                                before_obs = state_before_action.get('raw_obs', {})
+                                after_obs = state_after_action.get('raw_obs', {})
+                                before_raised = before_obs.get('raised', [0, 0])
+                                after_raised = after_obs.get('raised', [0, 0])
+                                
+                                if player_id is not None and player_id < len(before_raised) and player_id < len(after_raised):
+                                    before_amount = before_raised[player_id]
+                                    after_amount = after_raised[player_id]
+                                    
+                                    # For raise actions (2, 3) and all-in (4), use total amount raised TO
+                                    # ActionLabeling._get_raise_label expects the total amount raised TO, not the additional amount
+                                    if action_value_for_check in [2, 3, 4]:
+                                        bet_amount = after_amount  # Total amount raised TO
+                                    else:
+                                        # For call/check (1) or fold (0), use the difference
+                                        bet_amount = after_amount - before_amount
+                            
+                            # If bet_amount calculation failed, try fallback methods
+                            if bet_amount == 0 and action_value_for_check == 1:  # Check/Call action
+                                # For Check/Call, try to determine if it's a call by checking if facing a bet
+                                if state_before_action and 'raw_obs' in state_before_action:
+                                    before_obs = state_before_action['raw_obs']
+                                    before_raised = before_obs.get('raised', [0, 0])
+                                    if player_id is not None and len(before_raised) > 1 - player_id:
+                                        player_raised_before = before_raised[player_id] if player_id < len(before_raised) else 0
+                                        opponent_raised_before = before_raised[1 - player_id] if len(before_raised) > 1 - player_id else 0
+                                        epsilon = 0.01
+                                        # If opponent raised more than player, this is a call
+                                        if abs(opponent_raised_before - player_raised_before) > epsilon:
+                                            # Calculate call amount
+                                            bet_amount = opponent_raised_before - player_raised_before
+                            
+                            # Final fallback to original method
                             if bet_amount == 0:
-                                temp_state_before = state_before_action
-                                bet_amount = self._get_bet_amount(action, env, player_id, temp_state_before)
+                                bet_amount = self._get_bet_amount_from_state(action, env, player_id, state_after_action)
+                                # If still 0, try calculating directly
+                                if bet_amount == 0:
+                                    temp_state_before = state_before_action
+                                    bet_amount = self._get_bet_amount(action, env, player_id, temp_state_before)
                             
                             # Format action name, using bet_amount to help determine correct label
+                            # IMPORTANT: Use state_before_action to get correct Check vs Call label
                             action_name = self._format_action_with_context(
                                 action, env, state_before_action, player_id, env.action_recorder[:i], bet_amount
                             )
@@ -519,10 +640,11 @@ class GameManager:
                                 'bet_amount': bet_amount
                             })
                             
-                            # Log action added to history
-                            logger.info(f"🎯 Action added - Session: {session_id}, P{player_id} ({'You' if player_id == 0 else 'Opp'}), {action_name}, Bet: {bet_amount}, Stage: {current_stage}")
+                            # Log action added to history - use the stage when action occurred, not current stage
+                            logger.info(f"🎯 Action added - Session: {session_id}, P{player_id} ({'You' if player_id == 0 else 'Opp'}), {action_name}, Bet: {bet_amount}, Stage: {action_stage} (action occurred at stage {action_stage}, current stage: {current_stage})")
                 
                 game['last_action_count'] = current_action_count
+                game['last_processed_stage'] = current_stage  # Track stage for next iteration
             
             # THIRD: Check if community cards were dealt (AFTER processing actions)
             # This ensures community cards appear after all actions in the previous street
@@ -859,7 +981,7 @@ class GameManager:
         return result
     
     def _action_to_string(self, action, env=None, state=None, player_id=None, bet_amount=None):
-        """Convert action value to display string"""
+        """Convert action value to display string using shared ActionLabeling module"""
         # Handle Action enum objects (from RLCard)
         if hasattr(action, 'value'):
             action_value = action.value
@@ -872,272 +994,22 @@ class GameManager:
             except (ValueError, TypeError):
                 return f'Action {action}'
         
-        # Map action values to display names
+        # Use shared ActionLabeling module for consistent labeling
+        try:
+            if state is not None:
+                context = ActionLabeling.get_context_from_state(state, player_id=player_id, env=env)
+                return ActionLabeling.get_action_label(action_value, context, bet_amount=bet_amount)
+        except Exception as e:
+            logger.debug(f"Error using ActionLabeling, falling back to simple labels: {e}")
+        
+        # Fallback to simple labels if ActionLabeling fails
         if action_value == 0:
             return 'Fold'
         elif action_value == 1:
-            # Determine if it's "Check" or "Call" based on bet_amount (simplest and most reliable)
-            # If bet_amount is provided and > 0, it's a Call; if 0 or None, it's a Check
-            if bet_amount is not None and bet_amount > 0:
-                return 'Call'
-            elif bet_amount is not None and bet_amount == 0:
-                return 'Check'
-            
-            # Fallback: Determine if it's "Check" or "Call" based on raised amounts
-            if env is not None and state is not None and player_id is not None:
-                try:
-                    raw_obs = state.get('raw_obs', {})
-                    raised = raw_obs.get('raised', [0, 0])
-                    stage = raw_obs.get('stage', 0)
-                    if hasattr(stage, 'value'):
-                        stage = stage.value
-                    elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
-                    
-                    big_blind = raw_obs.get('big_blind', 2)
-                    player_raised = raised[player_id] if player_id < len(raised) else 0
-                    opponent_raised = raised[1 - player_id] if len(raised) > 1 - player_id else 0
-                    
-                    # Preflop: Small blind can "Check" (complete blind) if big blind hasn't raised
-                    # Postflop: "Check" if player has matched opponent's bet, "Call" if opponent has bet more
-                    is_preflop = stage == 0
-                    
-                    # Get dealer_id to determine button
-                    dealer_id = None
-                    is_small_blind = False
-                    if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                        dealer_id = env.game.dealer_id
-                        if dealer_id is not None:
-                            button_id = (dealer_id + 1) % 2
-                            is_small_blind = button_id == player_id
-                    
-                    # Determine if facing a bet
-                    # Facing a bet if opponent has bet more than player (regardless of preflop/postflop)
-                    # The small blind posting 0.5BB and big blind posting 1.0BB means small blind IS facing a bet
-                    # Use a small epsilon to handle floating point comparison issues
-                    epsilon = 0.01
-                    
-                    # Special case for postflop: if both players have equal raised amounts (or both are 0),
-                    # it's a check, not a call. This handles the case where raised array might have stale
-                    # values from preflop when reconstructing state for postflop actions.
-                    if not is_preflop:
-                        # For postflop, if raised amounts are equal (within epsilon), it's a check
-                        if abs(opponent_raised - player_raised) <= epsilon:
-                            is_facing_bet = False
-                        else:
-                            is_facing_bet = (opponent_raised - player_raised) > epsilon
-                    else:
-                        is_facing_bet = (opponent_raised - player_raised) > epsilon
-                    
-                    # Additional check: look at action history to see if opponent just raised
-                    # This helps when the raised array might not be perfectly synchronized
-                    if not is_facing_bet and hasattr(env, 'action_recorder') and env.action_recorder:
-                        # Check recent actions to see if opponent raised
-                        for i in range(len(env.action_recorder) - 1, max(-1, len(env.action_recorder) - 5), -1):
-                            if i >= 0 and len(env.action_recorder[i]) >= 2:
-                                action_player_id, action_val = env.action_recorder[i][0], env.action_recorder[i][1]
-                                # If opponent (not the current player) just raised, we're facing a bet
-                                if action_player_id == 1 - player_id:
-                                    # Check if it was a raise action (value 2 or 3)
-                                    if action_val in [2, 3] or (hasattr(action_val, 'value') and action_val.value in [2, 3]):
-                                        is_facing_bet = True
-                                        break
-                                    # If opponent called or checked, stop checking (only if most recent)
-                                    if (action_val == 1 or (hasattr(action_val, 'value') and action_val.value == 1)) and i == len(env.action_recorder) - 1:
-                                        break
-                    
-                    # Special case: Preflop small blind always faces a bet from big blind
-                    # Even if raised array shows equal amounts after both act, small blind initially faces 1BB vs 0.5BB
-                    if is_preflop and is_small_blind and not is_facing_bet:
-                        # Check if we're at the start of preflop (small blind's first action)
-                        # If opponent has posted the big blind (1BB) and we've only posted small blind (0.5BB)
-                        # then we're facing a bet
-                        if opponent_raised >= big_blind * 0.9 and player_raised < big_blind * 0.9:
-                            is_facing_bet = True
-                    
-                    # If facing a bet, it's always "Call" (never "Check")
-                    if is_facing_bet:
-                        return 'Call'
-                    
-                    # If not facing a bet, it's "Check"
-                    return 'Check'
-                except Exception as e:
-                    # Fallback to "Check/Call" if we can't determine
-                    logger.debug(f"Could not determine Check vs Call: {e}")
-                    pass
             return 'Check/Call'
         elif action_value == 2:
-            # Determine appropriate label based on context
-            if env is not None and state is not None and player_id is not None:
-                try:
-                    raw_obs = state.get('raw_obs', {})
-                    stage = raw_obs.get('stage', 0)
-                    if hasattr(stage, 'value'):
-                        stage = stage.value
-                    elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
-                    
-                    raised = raw_obs.get('raised', [0, 0])
-                    pot = raw_obs.get('pot', 0)
-                    big_blind = raw_obs.get('big_blind', 2)
-                    player_raised = raised[player_id] if player_id < len(raised) else 0
-                    opponent_raised = raised[1 - player_id] if len(raised) > 1 - player_id else 0
-                    
-                    # Check if preflop
-                    if stage == 0:
-                        # Get dealer_id to determine button
-                        dealer_id = None
-                        if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                            dealer_id = env.game.dealer_id
-                        
-                        # In heads-up, small blind = (dealer + 1) % 2
-                        if dealer_id is not None:
-                            button_id = (dealer_id + 1) % 2
-                            is_small_blind = button_id == player_id
-                            is_first_to_act = player_raised == opponent_raised and player_raised <= big_blind
-                            is_facing_bet = opponent_raised > player_raised
-                            
-                            # Determine betting level based on opponent's raise amount, not pot size
-                            opponent_raised_bb = opponent_raised / big_blind if big_blind > 0 else 0
-                            
-                            # IMPORTANT: Check is_facing_bet FIRST - if facing a bet, we're not "first to act" for betting purposes
-                            if is_facing_bet:
-                                # Use bet_amount if available to determine the actual raise size
-                                # This helps when the state reconstruction might not be perfect
-                                if bet_amount is not None and bet_amount > 0:
-                                    bet_amount_bb = bet_amount / big_blind if big_blind > 0 else 0
-                                    # If bet_amount is 10BB, this is a 3-bet
-                                    if 9.5 <= bet_amount_bb <= 10.5:
-                                        return '3-bet to 10BB'
-                                    # If bet_amount is 15BB, this is a 4-bet
-                                    elif 14.5 <= bet_amount_bb <= 15.5:
-                                        return '4-bet to 15BB'
-                                    # If bet_amount is 18BB, this is a 4-bet (pot raise)
-                                    elif 17.5 <= bet_amount_bb <= 18.5:
-                                        return '4-bet to 18BB'
-                                    # If bet_amount is 7-8BB, this is also a 3-bet (smaller sizing)
-                                    elif 6.5 <= bet_amount_bb <= 8.5:
-                                        return f'3-bet to {int(round(bet_amount_bb))}BB'
-
-                                # Fallback: Determine what we're facing based on opponent's raise
-                                if opponent_raised_bb <= 1.1:
-                                    # Opponent just posted big blind (or checked) - shouldn't happen for RAISE_HALF_POT
-                                    return 'Raise to 3BB'
-                                elif opponent_raised_bb <= 4.0:
-                                    # Facing a button open (3BB) - this is a 3-bet, should be to 10BB
-                                    return '3-bet to 10BB'
-                                elif opponent_raised_bb <= 12.0:
-                                    # Facing a 3-bet (7-10BB) - this is a 4-bet
-                                    return '4-bet to 15BB'
-                                else:
-                                    # Facing a 4-bet or higher, calculate raise sizes in BB
-                                    bet_to_call = opponent_raised - player_raised
-                                    raise_25x_total = bet_to_call * 2.5 + bet_to_call
-                                    raise_25x_bb = round(raise_25x_total / big_blind) if big_blind > 0 else 0
-                                    return f'Raise to {raise_25x_bb}BB'
-                            elif is_small_blind and is_first_to_act:
-                                # Small blind opening (unopened pot, only blinds posted)
-                                # Only show this if NOT facing a bet
-                                return 'Raise to 3BB'
-                            else:
-                                # Big blind not facing a bet (can still raise) - show BB amounts
-                                # Standard preflop raise sizes: 3BB and 4BB
-                                return 'Raise to 3BB'
-                    else:
-                        # Postflop
-                        is_first_to_act = player_raised == opponent_raised
-                        is_facing_bet = opponent_raised > player_raised
-                        
-                        if is_first_to_act:
-                            return 'Bet ½ Pot'
-                        elif is_facing_bet:
-                            bet_to_call = opponent_raised - player_raised
-                            raise_25x_total = bet_to_call * 2.5 + bet_to_call
-                            raise_25x_bb = round(raise_25x_total / big_blind) if big_blind > 0 else 0
-                            return f'Raise to {raise_25x_bb}BB'
-                except Exception:
-                    # Fallback to normal raise text if we can't determine
-                    pass
             return 'Raise ½ Pot'
         elif action_value == 3:
-            # Determine appropriate label based on context
-            if env is not None and state is not None and player_id is not None:
-                try:
-                    raw_obs = state.get('raw_obs', {})
-                    stage = raw_obs.get('stage', 0)
-                    if hasattr(stage, 'value'):
-                        stage = stage.value
-                    elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
-                    
-                    raised = raw_obs.get('raised', [0, 0])
-                    pot = raw_obs.get('pot', 0)
-                    big_blind = raw_obs.get('big_blind', 2)
-                    player_raised = raised[player_id] if player_id < len(raised) else 0
-                    opponent_raised = raised[1 - player_id] if len(raised) > 1 - player_id else 0
-                    
-                    # Check if preflop
-                    if stage == 0:
-                        is_facing_bet = opponent_raised > player_raised
-                        
-                        # Determine betting level based on opponent's raise amount, not pot size
-                        # This is more accurate for preflop situations
-                        opponent_raised_bb = opponent_raised / big_blind if big_blind > 0 else 0
-                        player_raised_bb = player_raised / big_blind if big_blind > 0 else 0
-                        
-                        if is_facing_bet:
-                            # Use bet_amount if available to determine the actual raise size
-                            # This helps when the state reconstruction might not be perfect
-                            if bet_amount is not None and bet_amount > 0:
-                                bet_amount_bb = bet_amount / big_blind if big_blind > 0 else 0
-                                # If bet_amount is 10BB, this is a 3-bet
-                                if 9.5 <= bet_amount_bb <= 10.5:
-                                    return '3-bet to 10BB'
-                                # If bet_amount is 15BB, this is a 4-bet
-                                elif 14.5 <= bet_amount_bb <= 15.5:
-                                    return '4-bet to 15BB'
-                                # If bet_amount is 18BB, this is a 4-bet (pot raise)
-                                elif 17.5 <= bet_amount_bb <= 18.5:
-                                    return '4-bet to 18BB'
-                                # If bet_amount is 7-8BB, this is also a 3-bet (smaller sizing)
-                                elif 6.5 <= bet_amount_bb <= 8.5:
-                                    return f'3-bet to {int(round(bet_amount_bb))}BB'
-                            
-                            # Fallback: Determine what we're facing based on opponent's raise
-                            if opponent_raised_bb <= 1.1:
-                                # Opponent just posted big blind (or checked) - shouldn't happen for RAISE_POT
-                                return 'Raise to 3BB'
-                            elif opponent_raised_bb <= 4.0:
-                                # Facing a button open (3BB) - this is a 3-bet, should be to 10BB
-                                return '3-bet to 10BB'
-                            elif opponent_raised_bb <= 12.0:
-                                # Facing a 3-bet (7-10BB) - this is a 4-bet
-                                return '4-bet to 18BB'
-                            else:
-                                # Facing a 4-bet or higher, calculate raise sizes in BB
-                                bet_to_call = opponent_raised - player_raised
-                                raise_3x_total = bet_to_call * 3 + bet_to_call
-                                raise_3x_bb = round(raise_3x_total / big_blind) if big_blind > 0 else 0
-                                return f'Raise to {raise_3x_bb}BB'
-                        else:
-                            # Big blind not facing a bet (can still raise) - show BB amounts
-                            # Standard preflop raise size: 3BB only
-                            return 'Raise to 3BB'
-                    else:
-                        # Postflop
-                        is_first_to_act = player_raised == opponent_raised
-                        is_facing_bet = opponent_raised > player_raised
-                        
-                        if is_first_to_act:
-                            return 'Bet ⅔ Pot'
-                        elif is_facing_bet:
-                            bet_to_call = opponent_raised - player_raised
-                            raise_3x_total = bet_to_call * 3 + bet_to_call
-                            raise_3x_bb = round(raise_3x_total / big_blind) if big_blind > 0 else 0
-                            return f'Raise to {raise_3x_bb}BB'
-                except Exception:
-                    # Fallback to normal raise text if we can't determine
-                    pass
             return 'Raise Pot'
         elif action_value == 4:
             return 'All-In'
@@ -1334,8 +1206,9 @@ class GameManager:
     
     def process_action(self, session_id, action_value):
         """Process a player action"""
+        logger.info(f"🔄 [PROCESS_ACTION] Starting action processing - Session: {session_id}, Action Value: {action_value}")
         if session_id not in self.games:
-            logger.warning(f"⚠️ Game session not found: {session_id}. Available sessions: {list(self.games.keys())}")
+            logger.warning(f"⚠️ [PROCESS_ACTION] Game session not found: {session_id}. Available sessions: {list(self.games.keys())}")
             return None
         
         game = self.games[session_id]
@@ -1358,19 +1231,66 @@ class GameManager:
         raw_legal_actions = state['raw_obs'].get('raw_legal_actions', [])
         legal_actions_dict = state['raw_obs'].get('legal_actions', {})
 
+        logger.info(f"🔍 [PROCESS_ACTION] Legal actions detection - Raw Legal: {raw_legal_actions}, Legal Dict: {legal_actions_dict}")
+
+        def convert_actions(actions):
+            """Convert Action objects to integers"""
+            if not actions:
+                return []
+            result = []
+            # Handle dict/OrderedDict (legal_actions is often a dict)
+            if isinstance(actions, dict):
+                actions = list(actions.keys())
+            for action in actions:
+                if hasattr(action, 'value'):
+                    # Action enum - use .value
+                    result.append(action.value)
+                elif isinstance(action, int):
+                    result.append(action)
+                else:
+                    # Try to convert to int
+                    try:
+                        result.append(int(action))
+                    except (ValueError, TypeError):
+                        # If all else fails, try to get the value attribute
+                        action_value = getattr(action, 'action', None)
+                        if action_value is not None:
+                            result.append(action_value)
+                        # If still no value, skip this action (don't add 0 as fallback)
+            return result
+
         # Convert legal_actions dict to list if needed
         legal_actions_list = []
         if raw_legal_actions and len(raw_legal_actions) > 0:
-            legal_actions_list = raw_legal_actions.copy()  # Make a copy to avoid modifying original
+            legal_actions_list = convert_actions(raw_legal_actions)  # Convert Action enums to integers
         elif legal_actions_dict:
             # Convert dict keys to list
             if isinstance(legal_actions_dict, dict):
-                legal_actions_list = list(legal_actions_dict.keys())
+                legal_actions_list = convert_actions(list(legal_actions_dict.keys()))
             elif isinstance(legal_actions_dict, list):
-                legal_actions_list = legal_actions_dict.copy()
+                legal_actions_list = convert_actions(legal_actions_dict)
 
-        # Track original legal actions before modifications
-        original_legal_actions = legal_actions_list.copy()
+        # Get the TRUE legal actions directly from RLCard environment
+        # This is critical because RLCard's env.step() will only accept actions that env.get_legal_actions() returns
+        try:
+            rlcard_legal_actions = env.get_legal_actions()
+            original_legal_actions = convert_actions(rlcard_legal_actions)
+            logger.info(f"✅ [PROCESS_ACTION] RLCard legal actions retrieved: {rlcard_legal_actions} -> {original_legal_actions}")
+        except Exception as e:
+            logger.warning(f"⚠️ [PROCESS_ACTION] Failed to get legal actions from RLCard environment, using state data: {e}")
+            # If RLCard doesn't support get_legal_actions, fall back to basic poker actions
+            # But ensure we have valid actions - don't rely on potentially empty state data
+            if legal_actions_list and len(legal_actions_list) > 0:
+                original_legal_actions = legal_actions_list.copy()
+                logger.info(f"🔄 [PROCESS_ACTION] Using state-based legal actions: {original_legal_actions}")
+            else:
+                # Ultimate fallback: basic poker actions for current stage
+                stage = raw_obs.get('stage', 0)
+                if stage == 0:  # Preflop
+                    original_legal_actions = [0, 1, 3, 4]  # FOLD, CHECK_CALL, RAISE_POT, ALL_IN (avoid RAISE_HALF_POT issues)
+                else:  # Postflop
+                    original_legal_actions = [0, 1, 2, 3, 4]  # All actions
+                logger.info(f"🔄 [PROCESS_ACTION] Using ultimate fallback legal actions for stage {stage}: {original_legal_actions}")
 
         # Get stage and button_id for the fix (same logic as in get_game_state)
         raw_obs = state.get('raw_obs', {})
@@ -1393,6 +1313,7 @@ class GameManager:
         # Fix for small blind first to act preflop - ensure standard raise options are available
         # This must match the fix in get_game_state to keep indices consistent
         artificially_added_actions = []
+        logger.info(f"🔧 [PROCESS_ACTION] Checking for artificially added actions - Stage: {stage}, Player: {current_player}, Button: {button_id}, Game Over: {env.is_over()}")
         if (stage == 0 and  # Preflop
             current_player == 0 and  # Human player (small blind in heads-up)
             not env.is_over() and
@@ -1400,9 +1321,11 @@ class GameManager:
 
             # Small blind should always be able to make standard preflop raises
             # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
-            if 2 not in legal_actions_list:  # RAISE_HALF_POT (Raise to 3 BB)
+            logger.info(f"🔧 [PROCESS_ACTION] Small blind preflop check - Action 2 in list: {2 in legal_actions_list}, Action 3 in RLCard: {3 in original_legal_actions}")
+            if 2 not in legal_actions_list and 3 in original_legal_actions:  # RAISE_HALF_POT (Raise to 3 BB) only if RAISE_POT is available in RLCard
                 legal_actions_list.append(2)
                 artificially_added_actions.append(2)
+                logger.info(f"🔧 [PROCESS_ACTION] Added artificial action 2 (RAISE_HALF_POT) to legal actions list")
         
         # Edge case: No legal actions
         if not legal_actions_list or len(legal_actions_list) == 0:
@@ -1411,20 +1334,59 @@ class GameManager:
         
         # Handle artificially added actions that RLCard doesn't actually support
         actual_action_value = action_value
+        logger.info(f"🔄 [PROCESS_ACTION] Action mapping check - Original action: {action_value}, Artificially added: {artificially_added_actions}")
+
         if action_value in artificially_added_actions:
             # Map artificially added actions to legal alternatives
             if action_value == 2 and 3 in original_legal_actions:  # RAISE_HALF_POT -> RAISE_POT
-                logger.info(f"Mapping artificially added action {action_value} (RAISE_HALF_POT) to {3} (RAISE_POT) for session {session_id}")
+                logger.info(f"🔄 [PROCESS_ACTION] Mapping artificially added action {action_value} (RAISE_HALF_POT) to {3} (RAISE_POT) for session {session_id}")
                 actual_action_value = 3
             else:
+                logger.error(f'❌ [PROCESS_ACTION] Action {action_value} was artificially added but no legal alternative found. RLCard legal actions: {original_legal_actions}')
                 raise ValueError(f'Action {action_value} was artificially added but no legal alternative found')
+        elif action_value == 2:
+            # Special case: Action 2 (RAISE_HALF_POT) may be sent even if not artificially added
+            # If action 3 (RAISE_POT) is legal in RLCard, map action 2 to action 3
+            logger.info(f"🔄 [PROCESS_ACTION] Special case check for action 2 - Action 3 legal: {3 in original_legal_actions}, Action 2 legal: {2 in original_legal_actions}")
+            if 3 in original_legal_actions:
+                logger.info(f"🔄 [PROCESS_ACTION] Special case: Mapping action {action_value} (RAISE_HALF_POT) to {3} (RAISE_POT) for session {session_id}")
+                actual_action_value = 3
+            elif 2 in original_legal_actions:
+                # Action 2 is actually legal in RLCard, use it directly
+                logger.info(f"🔄 [PROCESS_ACTION] Action 2 is directly legal in RLCard, using as-is")
+                actual_action_value = 2
+            else:
+                logger.error(f'❌ [PROCESS_ACTION] Action {action_value} is not legal in RLCard and cannot be mapped. RLCard legal actions: {original_legal_actions}')
+                raise ValueError(f'Action {action_value} is not legal in RLCard and cannot be mapped')
 
-        # Find the action index from the action value
-        if actual_action_value not in original_legal_actions:
-            raise ValueError(f'Invalid action value: {actual_action_value} (not in original legal actions: {original_legal_actions})')
+        # Find the action index, handling both integers and Action enums
+        logger.info(f"🔍 [PROCESS_ACTION] Finding action index for value {actual_action_value} in RLCard actions: {original_legal_actions}")
+        action_index = None
+        action = None
+        for i, orig_action in enumerate(original_legal_actions):
+            if hasattr(orig_action, 'value'):
+                logger.debug(f"🔍 [PROCESS_ACTION] Checking enum action {i}: {orig_action} (value: {orig_action.value})")
+                if actual_action_value == orig_action.value:
+                    action_index = i
+                    action = orig_action
+                    break
+            else:
+                logger.debug(f"🔍 [PROCESS_ACTION] Checking int action {i}: {orig_action}")
+                if actual_action_value == orig_action:
+                    action_index = i
+                    action = orig_action
+                    break
 
-        action_index = original_legal_actions.index(actual_action_value)
-        action = original_legal_actions[action_index]
+        if action_index is None:
+            # Special debug: check what we have
+            action_values_in_list = []
+            for orig_action in original_legal_actions:
+                if hasattr(orig_action, 'value'):
+                    action_values_in_list.append(orig_action.value)
+                else:
+                    action_values_in_list.append(orig_action)
+            logger.error(f"❌ [PROCESS_ACTION] Could not find action {actual_action_value} in RLCard legal actions. Available values: {action_values_in_list}, Full RLCard actions: {original_legal_actions}")
+            raise ValueError(f'Could not find action {actual_action_value} in RLCard legal actions. Available: {action_values_in_list}, RLCard legal actions: {original_legal_actions}')
 
         # Edge case: Action is None or invalid
         if action is None:
@@ -1438,6 +1400,10 @@ class GameManager:
         elif not isinstance(stage, int):
             stage = int(stage) if stage else 0
 
+        pot = raw_obs.get('pot', 0)
+        public_cards = raw_obs.get('public_cards', [])
+        player_hand = game.get('player_hand', [])
+
         stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
         stage_name = stage_names.get(stage, f'Stage {stage}')
         action_name = self._action_to_string(action, env, state, current_player)
@@ -1448,35 +1414,138 @@ class GameManager:
             logger.info(f"👤 Player action - Session: {session_id}, {stage_name}, Requested: {requested_action_name} ({action_value}) -> Executed: {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}, Hand: {player_hand}")
         else:
             logger.info(f"👤 Player action - Session: {session_id}, {stage_name}, {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}, Hand: {player_hand}")
-
-        pot = raw_obs.get('pot', 0)
-        public_cards = raw_obs.get('public_cards', [])
-        player_hand = game.get('player_hand', [])
         raised = raw_obs.get('raised', [0, 0])
-        
+
+        # CRITICAL FIX: Re-check legal actions right before env.step() to ensure they haven't changed
+        # This fixes the "Action not allowed" error that can occur due to timing issues
+        try:
+            current_legal_actions = env.get_legal_actions()
+            current_legal_actions = convert_actions(current_legal_actions)
+            logger.info(f"🔍 [PROCESS_ACTION] Re-checking legal actions before env.step(): {current_legal_actions}")
+
+            # Verify our action_index is still valid
+            if action_index >= len(current_legal_actions):
+                logger.error(f"❌ [PROCESS_ACTION] Action index {action_index} is out of bounds for current legal actions: {current_legal_actions}")
+                raise ValueError(f'Action index {action_index} is no longer valid. Current legal actions: {current_legal_actions}')
+
+            current_action_at_index = current_legal_actions[action_index]
+            if current_action_value != actual_action_value:
+                logger.warning(f"⚠️ [PROCESS_ACTION] Action at index {action_index} changed from {actual_action_value} to {current_action_value}. Using new value.")
+                actual_action_value = current_action_value
+                # Re-find the action index with the updated value
+                for i, orig_action in enumerate(original_legal_actions):
+                    if hasattr(orig_action, 'value'):
+                        if actual_action_value == orig_action.value:
+                            action_index = i
+                            action = orig_action
+                            break
+                    else:
+                        if actual_action_value == orig_action:
+                            action_index = i
+                            action = orig_action
+                            break
+        except AttributeError:
+            # RLCard environment doesn't have get_legal_actions() method, skip the re-check
+            logger.info(f"🔍 [PROCESS_ACTION] Skipping legal actions re-check (RLCard doesn't support it)")
+
         # Set action in human agent
         human_agent.set_action(action)
-        
+
         try:
-            # Process action
-            next_state, next_player_id = env.step(action, human_agent.use_raw)
-            
+            # Use raw_action=False mode which does validation and conversion through _decode_action
+            # _decode_action expects the Action enum value (int), not the index
+            step_action = action  # Pass the action value (int) for _decode_action to convert to Action enum
+            raw_action = False  # Let RLCard decode and validate the action
+            logger.info(f"🎯 [PROCESS_ACTION] About to call env.step() - Action Value: {step_action}, raw_action: {raw_action}")
+
+            logger.info(f"🎯 [PROCESS_ACTION] env.step() call details - Action: {step_action}, Type: {type(step_action)}, raw_action: {raw_action}")
+
+            # DEBUG: Try to get current legal actions right before step
+            try:
+                current_legal = env._get_legal_actions()  # Use the env's _get_legal_actions method
+                logger.info(f"🔍 [PROCESS_ACTION] Current RLCard legal actions right before step: {current_legal}")
+            except Exception as debug_e:
+                logger.info(f"🔍 [PROCESS_ACTION] Cannot check current legal actions: {debug_e}")
+
+            next_state, next_player_id = env.step(step_action, raw_action)
+
+            logger.info(f"✅ [PROCESS_ACTION] env.step() succeeded - Next State: {'Valid' if next_state else 'None'}, Next Player: {next_player_id}")
+
             # Edge case: Environment error
             if next_state is None:
-                logger.error(f"Environment returned None state for session {session_id}, action: {action}")
+                logger.error(f"❌ [PROCESS_ACTION] Environment returned None state for session {session_id}, action: {action}")
                 # Try to return current game state as fallback
                 try:
+                    logger.info(f"🔄 [PROCESS_ACTION] Attempting fallback to current game state")
                     return self.get_game_state(session_id)
                 except Exception as fallback_error:
-                    logger.error(f"Failed to get game state as fallback: {fallback_error}")
+                    logger.error(f"❌ [PROCESS_ACTION] Failed to get game state as fallback: {fallback_error}")
                     return None
+
+            # Fix for HUNL action order: BB acts first postflop, then SB
+            # Get previous stage from current state
+            raw_obs = state.get('raw_obs', {})
+            prev_stage = raw_obs.get('stage', 0)
+            if hasattr(prev_stage, 'value'):
+                prev_stage = prev_stage.value
+            elif not isinstance(prev_stage, int):
+                prev_stage = int(prev_stage) if prev_stage else 0
             
+            # Get new stage from next state
+            next_raw_obs = next_state.get('raw_obs', {})
+            next_stage = next_raw_obs.get('stage', 0)
+            if hasattr(next_stage, 'value'):
+                next_stage = next_stage.value
+            elif not isinstance(next_stage, int):
+                next_stage = int(next_stage) if next_stage else 0
+            
+            # Get dealer_id to determine BB (dealer = BB in HUNL)
+            dealer_id = None
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+            
+            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB should act first
+            if prev_stage == 0 and next_stage > 0:
+                if dealer_id is not None:
+                    # BB (dealer) should act first postflop
+                    next_player_id = dealer_id
+                    logger.info(f"🔄 [PROCESS_ACTION] Postflop transition detected - Overriding next_player to BB (dealer): {next_player_id}")
+            
+            # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
+            # In heads-up postflop: BB acts first, then SB
+            elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
+                if dealer_id is not None:
+                    # BB (dealer) acts first, SB (non-dealer) acts second
+                    bb_player = dealer_id
+                    sb_player = (dealer_id + 1) % 2
+                    
+                    # If BB just acted, next should be SB
+                    if current_player == bb_player:
+                        next_player_id = sb_player
+                        logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - BB (P{bb_player}) acted, next is SB (P{sb_player})")
+                    # If SB just acted, next should be BB (if there's a bet) or end betting round
+                    elif current_player == sb_player:
+                        # Check if there's a bet (raised amounts differ)
+                        raised = next_raw_obs.get('raised', [0, 0])
+                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
+                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
+                        epsilon = 0.01
+                        
+                        # If raised amounts differ, SB must have bet/raised, so BB needs to act
+                        if abs(sb_raised - bb_raised) > epsilon:
+                            next_player_id = bb_player
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - SB (P{sb_player}) bet/raised (SB: {sb_raised}, BB: {bb_raised}), next is BB (P{bb_player})")
+                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
+                        # Don't override in this case - let RLCard determine if betting round ends
+                        else:
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - Both players checked (SB: {sb_raised}, BB: {bb_raised}), letting RLCard handle next state")
+
             # Update game state
+            logger.info(f"🔄 [PROCESS_ACTION] Updating game state - Next Player: {next_player_id}")
             game['current_state'] = next_state
             game['current_player'] = next_player_id
             
-            # Get updated state info for logging
-            next_raw_obs = next_state.get('raw_obs', {})
+            # Get updated state info for logging (next_raw_obs already defined above)
             next_pot = next_raw_obs.get('pot', 0)
             next_public_cards = next_raw_obs.get('public_cards', [])
             next_raised = next_raw_obs.get('raised', [0, 0])
@@ -1489,7 +1558,9 @@ class GameManager:
             
             return self.get_game_state(session_id)
         except Exception as e:
-            logger.error(f"Error processing action for session {session_id}: {str(e)}")
+            logger.error(f"❌ [PROCESS_ACTION] Error processing action for session {session_id}: {str(e)}")
+            logger.error(f"❌ [PROCESS_ACTION] Action details - Requested: {action_value}, Mapped: {actual_action_value}, Index: {action_index}, Action: {action}")
+            logger.error(f"❌ [PROCESS_ACTION] Legal actions context - RLCard: {original_legal_actions}, Modified: {legal_actions_list}, Artificial: {artificially_added_actions}")
             raise
     
     def process_ai_turn(self, session_id):
@@ -1520,17 +1591,58 @@ class GameManager:
             state_with_dealer = state.copy()
             state_with_dealer['dealer_id'] = dealer_id
 
+            # Ensure legal actions are available in state for AI agent
+            if not state_with_dealer.get('raw_legal_actions'):
+                try:
+                    env_legal_actions = env.get_legal_actions()
+                    state_with_dealer['raw_legal_actions'] = env_legal_actions
+                    logger.info(f"✅ [AI_TURN] Added raw_legal_actions from env: {env_legal_actions}")
+                except Exception as e:
+                    logger.warning(f"⚠️ [AI_TURN] Failed to get legal actions from env: {e}")
+                    # Fallback to basic actions based on game stage
+                    raw_obs = state_with_dealer.get('raw_obs', {})
+                    stage = raw_obs.get('stage', 0)
+                    if stage == 0:  # Preflop
+                        fallback_actions = [Action.FOLD, Action.CHECK_CALL, Action.RAISE_POT, Action.ALL_IN]
+                    else:  # Postflop
+                        fallback_actions = [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
+                    state_with_dealer['raw_legal_actions'] = fallback_actions
+                    logger.info(f"🔄 [AI_TURN] Using fallback legal actions for stage {stage}: {fallback_actions}")
+
+            logger.info(f"🔍 [AI_TURN] State being passed to AI agent: raw_legal_actions = {state_with_dealer.get('raw_legal_actions', [])}")
+
             # Get AI action
             action, _ = ai_agent.eval_step(state_with_dealer)
-            
+
             # Edge case: AI action is None or invalid
             if action is None:
                 logger.warning(f"AI agent returned None action for session {session_id}")
                 # Default to fold if action is None
-                legal_actions = state['raw_obs'].get('raw_legal_actions', [])
+                legal_actions = state_with_dealer.get('raw_legal_actions', [])
                 if legal_actions and len(legal_actions) > 0:
                     action = legal_actions[0]  # First action is usually fold/check
                 else:
+                    return self.get_game_state(session_id)
+
+            # Find action index for use_raw=True agents
+            action_index = None
+            if ai_agent.use_raw:
+                # Get legal actions from the state that was passed to the AI agent
+                legal_actions = state_with_dealer.get('raw_legal_actions', [])
+                logger.info(f"🔍 [AI_TURN] Finding action index for {action} in legal actions: {legal_actions}")
+                logger.info(f"🔍 [AI_TURN] Full raw_obs: {state_with_dealer.get('raw_obs', {})}")
+                for i, legal_action in enumerate(legal_actions):
+                    # Handle both Action enums and integers
+                    legal_value = legal_action.value if hasattr(legal_action, 'value') else legal_action
+                    action_value = action.value if hasattr(action, 'value') else action
+                    logger.debug(f"🔍 [AI_TURN] Checking legal action {i}: {legal_action} (value: {legal_value}) vs action {action} (value: {action_value})")
+                    if legal_value == action_value:
+                        action_index = i
+                        break
+                if action_index is None:
+                    logger.error(f"❌ [AI_TURN] Could not find action {action} in legal actions {legal_actions}")
+                    logger.error(f"❌ [AI_TURN] Action type: {type(action)}, Action value: {action.value if hasattr(action, 'value') else action}")
+                    logger.error(f"❌ [AI_TURN] Available legal actions values: {[a.value if hasattr(a, 'value') else a for a in legal_actions]}")
                     return self.get_game_state(session_id)
             
             # Get action details for logging
@@ -1548,20 +1660,82 @@ class GameManager:
             public_cards = raw_obs.get('public_cards', [])
             raised = raw_obs.get('raised', [0, 0])
 
-            # Process action
-            next_state, next_player_id = env.step(action, ai_agent.use_raw)
+            # Process action - pass Action enum value when use_raw=True, action_index when use_raw=False
+            # Note: RLCard's use_raw=True means "use Action enum directly", not "use indices"
+            if ai_agent.use_raw:
+                step_action = action  # Pass the Action enum value
+            else:
+                step_action = action_index  # Pass the index into legal actions
+            next_state, next_player_id = env.step(step_action, ai_agent.use_raw)
             
             # Edge case: Environment error
             if next_state is None:
                 logger.error(f"Environment returned None state for AI turn in session {session_id}")
                 return None
             
+            # Fix for HUNL action order: BB acts first postflop, then SB
+            # Get previous stage from current state
+            raw_obs = state.get('raw_obs', {})
+            prev_stage = raw_obs.get('stage', 0)
+            if hasattr(prev_stage, 'value'):
+                prev_stage = prev_stage.value
+            elif not isinstance(prev_stage, int):
+                prev_stage = int(prev_stage) if prev_stage else 0
+            
+            # Get new stage from next state
+            next_raw_obs = next_state.get('raw_obs', {})
+            next_stage = next_raw_obs.get('stage', 0)
+            if hasattr(next_stage, 'value'):
+                next_stage = next_stage.value
+            elif not isinstance(next_stage, int):
+                next_stage = int(next_stage) if next_stage else 0
+            
+            # Get dealer_id to determine BB (dealer = BB in HUNL)
+            dealer_id = None
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+            
+            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB should act first
+            if prev_stage == 0 and next_stage > 0:
+                if dealer_id is not None:
+                    # BB (dealer) should act first postflop
+                    next_player_id = dealer_id
+                    logger.info(f"🔄 [AI_TURN] Postflop transition detected - Overriding next_player to BB (dealer): {next_player_id}")
+            
+            # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
+            # In heads-up postflop: BB acts first, then SB
+            elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
+                if dealer_id is not None:
+                    # BB (dealer) acts first, SB (non-dealer) acts second
+                    bb_player = dealer_id
+                    sb_player = (dealer_id + 1) % 2
+                    
+                    # If BB just acted, next should be SB
+                    if current_player == bb_player:
+                        next_player_id = sb_player
+                        logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) acted, next is SB (P{sb_player})")
+                    # If SB just acted, next should be BB (if there's a bet) or end betting round
+                    elif current_player == sb_player:
+                        # Check if there's a bet (raised amounts differ)
+                        raised = next_raw_obs.get('raised', [0, 0])
+                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
+                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
+                        epsilon = 0.01
+                        
+                        # If raised amounts differ, SB must have bet/raised, so BB needs to act
+                        if abs(sb_raised - bb_raised) > epsilon:
+                            next_player_id = bb_player
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - SB (P{sb_player}) bet/raised (SB: {sb_raised}, BB: {bb_raised}), next is BB (P{bb_player})")
+                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
+                        # Don't override in this case - let RLCard determine if betting round ends
+                        else:
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (SB: {sb_raised}, BB: {bb_raised}), letting RLCard handle next state")
+            
             # Update game state
             game['current_state'] = next_state
             game['current_player'] = next_player_id
             
-            # Get updated state info for logging
-            next_raw_obs = next_state.get('raw_obs', {})
+            # Get updated state info for logging (next_raw_obs already defined above)
             next_pot = next_raw_obs.get('pot', 0)
             next_public_cards = next_raw_obs.get('public_cards', [])
             next_raised = next_raw_obs.get('raised', [0, 0])
@@ -1688,11 +1862,44 @@ class GameManager:
             
             hand_history_storage[session_id].append(decision)
             
+            # Calculate bet_amount from state difference (similar to _build_action_history)
+            # For raise actions: use total amount raised TO (ActionLabeling expects this)
+            # For call/check: use the difference (amount to call)
+            bet_amount = 0
+            if state and next_state:
+                before_obs = state.get('raw_obs', {})
+                after_obs = next_state.get('raw_obs', {})
+                before_raised = before_obs.get('raised', [0, 0])
+                after_raised = after_obs.get('raised', [0, 0])
+                
+                if player_id is not None and player_id < len(before_raised) and player_id < len(after_raised):
+                    before_amount = before_raised[player_id]
+                    after_amount = after_raised[player_id]
+                    
+                    # Get action value to determine if it's a raise
+                    action_value = action
+                    if isinstance(action, (int, float)):
+                        action_value = int(action)
+                    
+                    # For raise actions (2, 3) and all-in (4), use total amount raised TO
+                    # ActionLabeling._get_raise_label expects the total amount raised TO, not the additional amount
+                    if action_value in [2, 3, 4]:
+                        bet_amount = after_amount  # Total amount raised TO
+                    else:
+                        # For call/check (1) or fold (0), use the difference
+                        bet_amount = after_amount - before_amount
+            
+            # Get env from game state for proper action labeling
+            env = None
+            if session_id in self.games:
+                game = self.games[session_id]
+                env = game.get('env', None)
+            
             # Enhanced logging for tracked decisions
             stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
             stage_name = stage_names.get(stage, f'Stage {stage}')
             player_name = 'Player' if player_id == 0 else 'AI'
-            action_name = self._action_to_string(action, None, state, player_id) if hasattr(self, '_action_to_string') else f'Action {action}'
+            action_name = self._action_to_string(action, env, state, player_id, bet_amount) if hasattr(self, '_action_to_string') else f'Action {action}'
 
             logger.info(f"📊 Decision tracked - Session: {session_id}, {player_name} (ID: {player_id}), {stage_name}, {action_name} ({action}), Pot: {pot}")
         except Exception as e:
@@ -1766,18 +1973,43 @@ def get_game_state():
 def process_action():
     """Process a player action"""
     try:
+        logger.info(f"🎯 [API] /api/game/action endpoint called")
         if not request.is_json:
+            logger.error(f"❌ [API] Request is not JSON")
             return jsonify({'error': 'Request must be JSON'}), 400
-        
+
         data = request.get_json()
         session_id = data.get('session_id')
         action_value = data.get('action_value')
+
+        logger.info(f"📥 [API] Received action request - Session: {session_id}, Action Value: {action_value}")
 
         if session_id is None:
             return jsonify({'error': 'Missing required field: session_id'}), 400
 
         if action_value is None:
             return jsonify({'error': 'Missing required field: action_value'}), 400
+        
+        # Validate action before processing
+        logger.info(f"🔍 [API] Validating action - Session: {session_id}, Action: {action_value}")
+        if session_id in game_manager.games:
+            # Get processed game state with legal actions
+            processed_state = game_manager.get_game_state(session_id)
+            if processed_state:
+                legal_actions = processed_state.get('raw_legal_actions', [])
+                raw_state = game_manager.games[session_id]['current_state']
+
+                logger.info(f"🔍 [API] Action validation details - Legal Actions: {legal_actions}, Raw State: {raw_state.get('raw_obs', {}).get('raw_legal_actions', [])}")
+
+                is_valid, error_msg = ActionValidator.validate_action(
+                    action_value, raw_state, player_id=0, legal_actions=legal_actions
+                )
+
+                logger.info(f"🔍 [API] ActionValidator result - Valid: {is_valid}, Error: {error_msg}")
+
+                if not is_valid:
+                    logger.warning(f"❌ [API] Invalid action rejected: {error_msg} for session {session_id}, action {action_value}")
+                    return jsonify({'error': error_msg}), 400
         
         # Check if session exists before processing
         if session_id not in game_manager.games:
@@ -1786,8 +2018,21 @@ def process_action():
                 'error': 'Game session not found. Please start a new game.',
                 'session_id': session_id
             }), 404
-        
+
+        # Check if it's the human player's turn (player 0)
+        game = game_manager.games[session_id]
+        current_player = game['current_player']
+        logger.info(f"🔄 [API] Turn check - Current Player: {current_player}, Session: {session_id}")
+        if current_player != 0:
+            logger.warning(f"⚠️ [API] Action rejected - Not player's turn. Current: {current_player}, Session: {session_id}")
+            return jsonify({
+                'error': 'Not your turn to act',
+                'current_player': current_player,
+                'waiting_for': 'opponent' if current_player == 1 else 'unknown'
+            }), 400
+
         # Process action
+        logger.info(f"⚙️ [API] Calling game_manager.process_action - Session: {session_id}, Action: {action_value}")
         game_state = game_manager.process_action(session_id, action_value)
         
         if game_state is None:
@@ -1801,9 +2046,65 @@ def process_action():
         return jsonify(game_state), 200
     
     except ValueError as e:
+        logger.error(f"❌ [API] ValueError in action processing: {str(e)}")
         return jsonify({'error': str(e)}), 400
     except Exception as e:
-        print(f"Error processing action: {str(e)}")
+        logger.error(f"❌ [API] Unexpected error processing action: {str(e)}")
+        logger.error(f"❌ [API] Full traceback: {traceback.format_exc()}")
+        return jsonify({'error': 'An unexpected error occurred'}), 500
+
+
+@app.route('/api/game/button-labels', methods=['POST'])
+def get_button_labels():
+    """Get button labels for current game context"""
+    try:
+        if not request.is_json:
+            return jsonify({'error': 'Request must be JSON'}), 400
+        
+        data = request.get_json()
+        session_id = data.get('session_id')
+        
+        if session_id is None:
+            return jsonify({'error': 'Missing required field: session_id'}), 400
+        
+        # Check if session exists
+        if session_id not in game_manager.games:
+            return jsonify({
+                'error': 'Game session not found. Please start a new game.',
+                'session_id': session_id
+            }), 404
+        
+        # Get game state
+        game_state = game_manager.get_game_state(session_id)
+        if game_state is None:
+            return jsonify({'error': 'Failed to get game state'}), 500
+        
+        # Extract context using ActionLabeling
+        game = game_manager.games[session_id]
+        env = game['env']
+        raw_state = game['current_state']
+        player_id = 0  # Human player
+
+        # Build state dict with both raw_obs and processed fields (in_chips, raised)
+        # game_state has top-level fields from get_game_state, which are more reliable
+        state_with_processed = {
+            'raw_obs': raw_state.get('raw_obs', {}),
+            'in_chips': game_state.get('in_chips', [0, 0]),
+            'raised': game_state.get('raised', [0, 0])
+        }
+
+        if 'raw_obs' in state_with_processed:
+            raw_obs = state_with_processed['raw_obs']
+
+        context = ActionLabeling.get_context_from_state(state_with_processed, player_id=player_id, env=env)
+        labels = ActionLabeling.get_button_labels(context)
+
+        return jsonify(labels), 200
+    
+    except ValueError as e:
+        return jsonify({'error': str(e)}), 400
+    except Exception as e:
+        logger.error(f"Error getting button labels: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'error': 'An unexpected error occurred'}), 500
 

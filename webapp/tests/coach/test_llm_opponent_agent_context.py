@@ -283,10 +283,11 @@ class TestContextBuilding:
         context = agent._build_context(state)
         
         labels = context['legal_actions_labels']
+        # Updated to match new ActionLabeling module output
         assert labels[Action.FOLD] == 'Fold'
-        assert labels[Action.CHECK_CALL] == 'Check/Call'
-        assert labels[Action.RAISE_HALF_POT] == 'Raise ½ Pot'
-        assert labels[Action.RAISE_POT] == 'Raise Pot'
+        assert labels[Action.CHECK_CALL] in ['Check', 'Call']  # Context-aware
+        assert 'Bet' in labels[Action.RAISE_HALF_POT] or 'Raise' in labels[Action.RAISE_HALF_POT]
+        assert 'Raise' in labels[Action.RAISE_POT] or 'Bet' in labels[Action.RAISE_POT]
         assert labels[Action.ALL_IN] == 'All-In'
 
 

@@ -8,7 +8,9 @@ for the No Limit Texas Hold'em web application.
 from .strategy_evaluator import StrategyEvaluator
 from .gto_rules import GTORules
 from .equity_calculator import EquityCalculator
+from .action_labeling import ActionLabeling
+from .action_validator import ActionValidator
 
-__all__ = ['StrategyEvaluator', 'GTORules', 'EquityCalculator']
+__all__ = ['StrategyEvaluator', 'GTORules', 'EquityCalculator', 'ActionLabeling', 'ActionValidator']
 
 

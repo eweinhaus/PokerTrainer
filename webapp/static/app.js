@@ -75,10 +75,15 @@ class PokerGame {
     }
 
     initializeEventListeners() {
+        // Enable debug logging
+        window.DEBUG_POKER = true;
+
         // Action buttons
         document.querySelectorAll('.action-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
                 const actionValue = parseInt(e.target.dataset.action);
+                const buttonText = e.target.textContent.trim();
+                console.log(`🎯 [FRONTEND] Button clicked - Action Value: ${actionValue}, Button Text: "${buttonText}", Session: ${this.sessionId}`);
                 this.handleAction(actionValue);
             });
         });
@@ -179,26 +184,32 @@ class PokerGame {
     }
 
     async handleAction(actionValue) {
+        console.log(`🔄 [FRONTEND] handleAction called - Action Value: ${actionValue}, Session: ${this.sessionId}, Game State: ${this.gameState ? 'Available' : 'Missing'}`);
+
         // Edge case: Already processing
         if (this.isProcessing) {
+            console.log(`⚠️ [FRONTEND] Action blocked - Already processing another action`);
             this.showNotification('Please wait for current action to complete', 'warning');
             return;
         }
-        
+
         // Edge case: No game state
         if (!this.gameState) {
+            console.log(`❌ [FRONTEND] Action blocked - No game state available`);
             this.showNotification('Game state not available. Please start a new game.', 'error');
             return;
         }
-        
+
         // Edge case: Not waiting for action
         if (!this.gameState.is_waiting_for_action) {
+            console.log(`⚠️ [FRONTEND] Action blocked - Not waiting for action. Current player: ${this.gameState.current_player}, Waiting: ${this.gameState.is_waiting_for_action}`);
             this.showNotification('Not your turn yet', 'warning');
             return;
         }
-        
+
         // Edge case: Game already over
         if (this.gameState.is_over) {
+            console.log(`⚠️ [FRONTEND] Action blocked - Game is already over`);
             this.showNotification('Game is already over', 'warning');
             return;
         }
@@ -206,12 +217,15 @@ class PokerGame {
         // Check if action is legal - check both legal_actions and raw_legal_actions (like updateActionButtons does)
         let isLegal = (this.gameState.legal_actions && this.gameState.legal_actions.includes(actionValue)) ||
                        (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.includes(actionValue));
-        
+
+        console.log(`🔍 [FRONTEND] Action validation - Action: ${actionValue}, Legal Actions: ${JSON.stringify(this.gameState.legal_actions)}, Raw Legal Actions: ${JSON.stringify(this.gameState.raw_legal_actions)}, Is Legal: ${isLegal}`);
+
         // Special case: If RAISE_HALF_POT (2) is clicked but not legal, and RAISE_POT (3) is legal with same label,
         // use RAISE_POT instead (they do the same thing in this context)
         if (!isLegal && actionValue === 2) {
             const raisePotLegal = (this.gameState.legal_actions && this.gameState.legal_actions.includes(3)) ||
                                  (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.includes(3));
+            console.log(`🔄 [FRONTEND] RAISE_HALF_POT mapping check - Raise Pot (3) is legal: ${raisePotLegal}`);
             if (raisePotLegal) {
                 // Check if both buttons have the same label (they do the same thing)
                 // We need to recalculate button labels to check
@@ -240,10 +254,13 @@ class PokerGame {
         }
         
         if (!isLegal) {
+            console.log(`❌ [FRONTEND] Action rejected - Not legal: ${actionValue}`);
             this.updateStatus('Illegal action!');
             this.showNotification('Invalid action selected', 'error');
             return;
         }
+
+        console.log(`✅ [FRONTEND] Action approved - Sending to backend. Action: ${actionValue}, Session: ${this.sessionId}`);
 
         // Action value will be validated on the backend
 
@@ -258,6 +275,8 @@ class PokerGame {
                 playerSection.classList.add('action-animating');
                 setTimeout(() => playerSection.classList.remove('action-animating'), 1000);
             }
+
+            console.log(`📡 [FRONTEND] Making API call to /api/game/action with action_value: ${actionValue}`);
 
             const response = await fetch('/api/game/action', {
                 method: 'POST',
@@ -314,7 +333,13 @@ class PokerGame {
                 this.updateActionButtons();
             }
         } catch (error) {
-            console.error('Error processing action:', error);
+            console.error('❌ [FRONTEND] Error processing action:', error);
+            console.error('❌ [FRONTEND] Error details:', {
+                message: error.message,
+                stack: error.stack,
+                sessionId: this.sessionId,
+                actionValue: actionValue
+            });
             const errorMessage = error.message || 'Unknown error occurred';
             this.updateStatus('Error: ' + errorMessage);
             this.showNotification(errorMessage, 'error', 5000);
@@ -1255,7 +1280,7 @@ class PokerGame {
         }
     }
 
-    updateActionButtons() {
+    async updateActionButtons() {
         if (!this.gameState || this.gameState.is_over) {
             this.disableAllButtons();
             return;
@@ -1276,61 +1301,34 @@ class PokerGame {
         const playerRaised = raised[0] || 0;
         const opponentRaised = raised[1] || 0;
         
-        // Detect context: first to act or facing a bet
-        // For preflop: small blind opening means opponent (big blind) has only posted the big blind (1BB)
-        //   and small blind has posted 0.5BB, so small blind is "first to act" but still facing a bet
-        // For postflop: first to act means both at 0 (new betting round)
-        // Small blind is "first to act" preflop if: preflop, small blind, opponent only posted blind (not raised)
-        const isPreflopFirstToAct = isPreflop && isSmallBlind && opponentRaised <= bigBlind;
-        const isPostflopFirstToAct = !isPreflop && (playerRaised === 0 && opponentRaised === 0);
-        const isFirstToAct = isPreflopFirstToAct || isPostflopFirstToAct;
-        
-        // Determine if facing a bet
-        // Facing a bet if opponent has bet more than player (regardless of preflop/postflop)
-        // The small blind posting 0.5BB and big blind posting 1.0BB means small blind IS facing a bet
-        // Use a small epsilon to handle floating point comparison issues
+        // Determine if facing a bet using ActionLabeling-compatible logic
         const epsilon = 0.01;
-        let isFacingBet = (opponentRaised - playerRaised) > epsilon;
-        
-        // Additional check: look at most recent action to see if opponent just raised
-        // This helps catch cases where raised array might not be perfectly synchronized
-        // IMPORTANT: For postflop, if both raised are 0, we're definitely first to act (new betting round)
-        // and should NOT check action history (which may contain preflop actions from previous street)
-        // The raised array is reset to [0, 0] at the start of each new betting round, so we can trust it
-        // Only check action history if we're preflop OR if we're postflop but not first to act
-        if (!isFacingBet && actionHistory.length > 0 && !isPostflopFirstToAct) {
-            // Check the last few actions to see if opponent raised
-            for (let i = actionHistory.length - 1; i >= Math.max(0, actionHistory.length - 5); i--) {
-                const action = actionHistory[i];
-                if (action.type === 'action' && action.player_id === 1) {
-                    const actionName = action.action || '';
-                    // If opponent raised, bet, or 3-bet/4-bet, we're facing a bet
-                    if (actionName.includes('Raise') || actionName.includes('3-bet') || 
-                        actionName.includes('4-bet') || actionName.includes('5-bet') ||
-                        actionName.includes('Bet')) {
-                        isFacingBet = true;
-                        break;
-                    }
-                    // If opponent called or checked, we're not facing a bet (unless raised array says otherwise)
-                    if (actionName === 'Call' || actionName === 'Check') {
-                        // But only break if this is the most recent action
-                        if (i === actionHistory.length - 1) {
-                            break;
-                        }
-                    }
-                }
+        let isFacingBet = false;
+
+        if (isPreflop) {
+            // Preflop: If opponent has raised more than player, player is facing a bet
+            // Special case: SB always faces BB's bet preflop (SB must call BB's bet)
+            if (isSmallBlind && opponentRaised >= bigBlind * 0.9 && playerRaised < bigBlind * 0.9) {
+                // SB facing BB's bet (blind post scenario)
+                isFacingBet = true;
+            } else {
+                // Standard logic: facing bet if opponent raised more than player
+                isFacingBet = (opponentRaised - playerRaised) > epsilon;
             }
+        } else {
+            // Postflop: facing bet if raised amounts differ
+            isFacingBet = Math.abs(opponentRaised - playerRaised) > epsilon;
         }
         
-        // Special case: Preflop small blind always faces a bet from big blind
-        // Even if raised array shows equal amounts after both act, small blind initially faces 1BB vs 0.5BB
-        if (isPreflop && isSmallBlind && !isFacingBet) {
-            // Check if we're at the start of preflop (small blind's first action)
-            // If opponent has posted the big blind (1BB) and we've only posted small blind (0.5BB)
-            // then we're facing a bet
-            if (opponentRaised >= bigBlind * 0.9 && playerRaised < bigBlind * 0.9) {
-                isFacingBet = true;
-            }
+        // Determine if first to act using ActionLabeling-compatible logic
+        let isFirstToAct = false;
+
+        if (isPreflop) {
+            // First to act preflop if not facing a bet
+            isFirstToAct = !isFacingBet;
+        } else {
+            // Postflop: first to act if both players have same raised amount (new betting round)
+            isFirstToAct = Math.abs(playerRaised - opponentRaised) <= epsilon;
         }
         
         // Determine if it's "Check" or "Call"
@@ -1380,11 +1378,108 @@ class PokerGame {
             }
         }
         
-        // Calculate button labels based on context
-        const buttonLabels = this.calculateButtonLabels(
-            isPreflop, isSmallBlind, isFirstToAct, isFacingBet,
-            bettingLevel, bigBlind, pot, opponentRaised, playerRaised, inChips
-        );
+        // Get button labels from backend API for consistency - API is authoritative
+        let buttonLabels = {
+            raiseHalfPot: 'Raise ½ Pot',
+            raisePot: 'Raise Pot',
+            showRaiseHalfPot: true,
+            showRaisePot: true,
+            checkCall: checkCallText
+        };
+
+        // Always try to fetch from API first - this should be the primary source
+        let apiSuccess = false;
+        try {
+            console.log(`🎯 [FRONTEND] Fetching button labels from API for session ${this.sessionId}`);
+            console.log(`📊 [FRONTEND] Current game state:`, {
+                stage: this.gameState.stage,
+                button_id: this.gameState.button_id,
+                raised: this.gameState.raised,
+                pot: this.gameState.pot,
+                current_player: this.gameState.current_player
+            });
+            const response = await fetch('/api/game/button-labels', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    session_id: this.sessionId
+                })
+            });
+
+            if (response.ok) {
+                const apiLabels = await response.json();
+                console.log(`✅ [FRONTEND] API returned labels:`, apiLabels);
+                buttonLabels = {
+                    raiseHalfPot: apiLabels.raiseHalfPot || buttonLabels.raiseHalfPot,
+                    raisePot: apiLabels.raisePot || buttonLabels.raisePot,
+                    showRaiseHalfPot: apiLabels.showRaiseHalfPot !== undefined ? apiLabels.showRaiseHalfPot : buttonLabels.showRaiseHalfPot,
+                    showRaisePot: apiLabels.showRaisePot !== undefined ? apiLabels.showRaisePot : buttonLabels.showRaisePot,
+                    checkCall: apiLabels.checkCall || checkCallText
+                };
+                apiSuccess = true;
+            } else {
+                const errorText = await response.text();
+                console.error(`❌ [FRONTEND] API returned error ${response.status}:`, errorText);
+            }
+        } catch (error) {
+            console.error(`❌ [FRONTEND] Failed to fetch button labels from API:`, error);
+        }
+
+        // Only use local calculation as fallback if API completely failed
+        if (!apiSuccess) {
+            console.warn(`⚠️ [FRONTEND] API failed, falling back to local calculation`);
+
+            // Use ActionLabeling-compatible logic for fallback
+            // Reconstruct context similar to ActionLabeling.get_context_from_state
+            const epsilon = 0.01;
+            let localIsFacingBet = false;
+            let localIsFirstToAct = false;
+            let localBettingLevel = 0;
+
+            if (isPreflop) {
+                // Preflop: If opponent has raised more than player, player is facing a bet
+                // Special case: SB always faces BB's bet preflop (SB must call BB's bet)
+                if (isSmallBlind && opponentRaised >= bigBlind * 0.9 && playerRaised < bigBlind * 0.9) {
+                    // SB facing BB's bet (blind post scenario)
+                    localIsFacingBet = true;
+                } else {
+                    // Standard logic: facing bet if opponent raised more than player
+                    localIsFacingBet = (opponentRaised - playerRaised) > epsilon;
+                }
+
+                // First to act preflop if not facing a bet
+                localIsFirstToAct = !localIsFacingBet;
+            } else {
+                // Postflop: facing bet if raised amounts differ
+                localIsFacingBet = Math.abs(opponentRaised - playerRaised) > epsilon;
+                localIsFirstToAct = playerRaised === opponentRaised;
+            }
+
+            // Determine betting level for preflop
+            if (isPreflop && localIsFacingBet) {
+                const opponentRaisedBB = opponentRaised / bigBlind;
+                if (opponentRaisedBB <= 4.0) {
+                    localBettingLevel = 0;  // Facing open
+                } else if (opponentRaisedBB <= 12.0) {
+                    localBettingLevel = 1;  // Facing 3-bet
+                } else {
+                    localBettingLevel = 2;  // Facing 4-bet+
+                }
+            }
+
+            console.log(`📊 [FRONTEND] Local calculation with ActionLabeling logic:`, {
+                isPreflop, isSmallBlind, localIsFirstToAct, localIsFacingBet, localBettingLevel,
+                bigBlind, pot, opponentRaised, playerRaised
+            });
+
+            buttonLabels = this.calculateButtonLabels(
+                isPreflop, isSmallBlind, localIsFirstToAct, localIsFacingBet,
+                localBettingLevel, bigBlind, pot, opponentRaised, playerRaised, inChips
+            );
+            buttonLabels.checkCall = localIsFacingBet ? 'Call' : 'Check';
+        }
 
         const buttons = document.querySelectorAll('.action-btn');
         
@@ -1393,12 +1488,44 @@ class PokerGame {
             // Check both legal_actions and raw_legal_actions
             const isLegal = (this.gameState.legal_actions && this.gameState.legal_actions.includes(actionValue)) ||
                            (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.includes(actionValue));
+
+            // Debug logging for legal actions
+            if (window.DEBUG_POKER && actionValue === 0) {  // Only log once per update
+                console.log(`🎯 [FRONTEND] Legal actions check for action ${actionValue}:`, {
+                    actionValue,
+                    legal_actions: this.gameState.legal_actions,
+                    raw_legal_actions: this.gameState.raw_legal_actions,
+                    isLegal,
+                    isWaiting: this.gameState.is_waiting_for_action,
+                    isMyTurn: this.gameState.current_player === 0
+                });
+            }
             const isWaiting = this.gameState.is_waiting_for_action;
             const isMyTurn = this.gameState.current_player === 0;
+            const isGameActive = !this.gameState.is_over;
+
+            // Enable/disable button - be more permissive for debugging
+            // Allow actions if legal and game is active, regardless of whose turn it is
+            const shouldEnable = isLegal && isGameActive;
+            btn.disabled = !shouldEnable;
+
+            // Debug logging for button state
+            if (window.DEBUG_POKER && actionValue === 0) {  // Only log once per update
+                console.log(`🔘 [FRONTEND] Button ${actionValue} final state:`, {
+                    actionValue,
+                    current_player: this.gameState.current_player,
+                    is_waiting_for_action: this.gameState.is_waiting_for_action,
+                    is_over: this.gameState.is_over,
+                    isLegal,
+                    isGameActive,
+                    shouldEnable,
+                    disabled: btn.disabled
+                });
+            }
 
             // Update button text based on context
             if (actionValue === 1) { // CHECK_CALL
-                btn.textContent = checkCallText;
+                btn.textContent = buttonLabels.checkCall || checkCallText;
                 btn.setAttribute('aria-label', `${checkCallText} - ${isCheck ? 'Pass without betting' : 'Match the current bet'}`);
             } else if (actionValue === 2) { // RAISE_HALF_POT
                 btn.textContent = buttonLabels.raiseHalfPot;

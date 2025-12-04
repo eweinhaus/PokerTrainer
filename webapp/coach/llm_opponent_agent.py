@@ -24,6 +24,9 @@ except Exception as e:
     OpenAI = None
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
+# Import shared action labeling module
+from .action_labeling import ActionLabeling
+
 # Import RLCard Action enum
 try:
     from rlcard.games.nolimitholdem.round import Action
@@ -206,13 +209,20 @@ class LLMOpponentAgent:
         
         Returns:
             tuple: (rank, suit) where rank is 0-12 (A=0, K=12) and suit is 0-3
+        
+        Raises:
+            ValueError: If card_index cannot be converted to valid integer or is out of range
         """
         # Convert to int if it's a string or numpy type
         if not isinstance(card_index, int):
             try:
                 card_index = int(card_index)
-            except (ValueError, TypeError):
-                card_index = 0
+            except (ValueError, TypeError) as e:
+                raise ValueError(f"Cannot convert card_index {card_index} to integer: {e}")
+        
+        # Validate card index is in valid range (0-51)
+        if card_index < 0 or card_index > 51:
+            raise ValueError(f"Card index {card_index} is out of valid range (0-51)")
         
         suit = card_index // 13
         rank = card_index % 13
@@ -303,6 +313,42 @@ class LLMOpponentAgent:
 
         return hand_ints
     
+    def _normalize_card_string(self, card_str):
+        """
+        Normalize card string to consistent format (Rank+Suit, e.g., "3h", "Ah").
+        Handles both "Rank+Suit" (e.g., "3h", "Ah") and "Suit+Rank" (e.g., "H3", "HA") formats.
+        
+        Args:
+            card_str (str): Card string in any format
+        
+        Returns:
+            str: Normalized card string in "Rank+Suit" format (e.g., "3h", "Ah")
+        """
+        if not isinstance(card_str, str) or len(card_str) < 2:
+            return card_str.upper() if isinstance(card_str, str) else str(card_str)
+        
+        card_str = card_str.upper().strip()
+        
+        # Map suit letters
+        suit_map = {'S': 's', 'H': 'h', 'D': 'd', 'C': 'c', '♠': 's', '♥': 'h', '♦': 'd', '♣': 'c'}
+        rank_map = {'A': 'A', '2': '2', '3': '3', '4': '4', '5': '5', '6': '6', '7': '7', 
+                   '8': '8', '9': '9', 'T': 'T', 'J': 'J', 'Q': 'Q', 'K': 'K'}
+        
+        # Check if format is "Suit+Rank" (e.g., "H3", "SA")
+        if len(card_str) == 2:
+            first_char = card_str[0]
+            second_char = card_str[1]
+            
+            # If first char is a suit and second is a rank, convert to "Rank+Suit"
+            if first_char in suit_map and second_char in rank_map:
+                return f"{rank_map[second_char]}{suit_map[first_char]}"
+            # If first char is a rank and second is a suit, already in correct format
+            elif first_char in rank_map and second_char in suit_map:
+                return f"{rank_map[first_char]}{suit_map[second_char]}"
+        
+        # If we can't normalize, return uppercase version
+        return card_str
+    
     def _card_index_to_string(self, card_index):
         """
         Convert RLCard card index to string format (e.g., "Ah", "Kd").
@@ -312,12 +358,22 @@ class LLMOpponentAgent:
         
         Returns:
             str: Card string like "Ah", "Kd", "2c", "Ts"
-        """
-        rank, suit = self._card_to_rank_suit(card_index)
-        rank_names = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
-        suit_names = ['c', 'd', 'h', 's']  # clubs, diamonds, hearts, spades
         
-        return f"{rank_names[rank]}{suit_names[suit]}"
+        Raises:
+            ValueError: If card_index is invalid or out of range
+        """
+        try:
+            rank, suit = self._card_to_rank_suit(card_index)
+            rank_names = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+            suit_names = ['c', 'd', 'h', 's']  # clubs, diamonds, hearts, spades
+            
+            if rank < 0 or rank >= len(rank_names) or suit < 0 or suit >= len(suit_names):
+                raise ValueError(f"Invalid rank {rank} or suit {suit} for card_index {card_index}")
+            
+            return f"{rank_names[rank]}{suit_names[suit]}"
+        except (ValueError, IndexError) as e:
+            logger.error(f"❌ [LLM_AGENT] Error converting card_index {card_index} to string: {e}")
+            raise
     
     def step(self, state):
         """
@@ -330,16 +386,52 @@ class LLMOpponentAgent:
             action: Action enum value (Action.FOLD, Action.CHECK_CALL, etc.)
         """
         raw_legal_actions = state.get('raw_legal_actions', [])
-        
+        logger.info(f"🔍 [LLM_AGENT] step() called with raw_legal_actions: {raw_legal_actions}")
+        logger.info(f"🔍 [LLM_AGENT] Full state raw_obs: {state.get('raw_obs', {})}")
+
         if not raw_legal_actions:
             # No legal actions - shouldn't happen
+            logger.error(f"❌ [LLM_AGENT] No legal actions found in state!")
             return Action.FOLD
-        
+
         # Check if LLM is available
         if not self.api_key_available or not self.client:
             logger.warning("LLM not available, using GTOAgent fallback")
             return self.gto_agent.step(state)
-        
+
+        # SPECIAL CASE: SB opening preflop - skip LLM and use GTO strategy directly
+        raw_obs = state.get('raw_obs', {})
+        stage = raw_obs.get('stage', 0)
+        if hasattr(stage, 'value'):
+            stage = stage.value
+        elif not isinstance(stage, int):
+            stage = int(stage) if stage else 0
+
+        # Check if this is a preflop SB opening scenario
+        if stage == 0:  # Preflop
+            # Determine if opponent is SB
+            dealer_id = state.get('dealer_id')
+            opponent_is_sb = False
+            if dealer_id is not None:
+                opponent_is_sb = (dealer_id == 0)  # If user is dealer (player 0), opponent (player 1) is SB
+            else:
+                # Fallback: assume opponent is SB if no dealer_id (legacy behavior)
+                opponent_is_sb = True
+
+            # Check if no one has raised yet (opening scenario)
+            raised = raw_obs.get('raised', [0, 0])
+            big_blind = raw_obs.get('big_blind', 2)
+            pot = raw_obs.get('pot', 0)
+            pot_bb = pot / big_blind if big_blind > 0 else 0
+
+            # Opening scenario: pot is just blinds (~1.5BB) and no raises
+            is_opening = (pot_bb <= 2.0 and
+                         (len(raised) < 2 or raised[1] <= big_blind * 1.1))
+
+            if opponent_is_sb and is_opening:
+                logger.info(f"🎯 [LLM_AGENT] SB opening scenario detected - skipping LLM, using GTO strategy directly")
+                return self.gto_agent.step(state)
+
         try:
             # 1. Extract opponent cards
             opponent_cards = self._extract_opponent_cards(state)
@@ -362,7 +454,8 @@ class LLMOpponentAgent:
                 return self.gto_agent.step(state)
             
             # 5. Map LLM action to RLCard Action enum and validate
-            action = self._map_llm_action_to_rlcard(llm_action, raw_legal_actions)
+            legal_actions_labels = context.get('legal_actions_labels', {})
+            action = self._map_llm_action_to_rlcard(llm_action, raw_legal_actions, legal_actions_labels=legal_actions_labels)
             
             # 6. Check if action is illegal (shouldn't happen after mapping, but double-check)
             if action not in raw_legal_actions:
@@ -445,6 +538,7 @@ class LLMOpponentAgent:
         big_blind = raw_obs.get('big_blind', 2)
         # Use 'stakes' for remaining chips (not 'all_chips')
         stakes = raw_obs.get('stakes', [100, 100])  # Default to 100 chips if not available
+
         
         # Determine positions based on dealer_id (for heads-up poker)
         dealer_id = state.get('dealer_id')
@@ -511,25 +605,48 @@ class LLMOpponentAgent:
         user_raised = raised[0] if len(raised) > 0 else 0
         opponent_raised = raised[1] if len(raised) > 1 else 0
         
-        # If user has raised more than big blind, they likely opened or 3-bet
-        if user_raised > big_blind and stage == 0:  # Preflop
-            bet_size_bb = user_raised / big_blind if big_blind > 0 else 0
-            if bet_size_bb >= 2.5 and bet_size_bb <= 3.5:
-                action_history.append({
-                    'player': 'user',
-                    'position': 'button',
-                    'action': 'raise',
-                    'bet_size_chips': user_raised,
-                    'bet_size_bb': bet_size_bb,
-                    'pot_before': small_blind + big_blind,
-                    'pot_after': pot,
-                    'stack_before': {'user': stakes[0] + user_raised if len(stakes) > 0 else 100,
-                                    'opponent': stakes[1] if len(stakes) > 1 else 100},
-                    'stack_after': {'user': stakes[0] if len(stakes) > 0 else 100,
-                                   'opponent': stakes[1] if len(stakes) > 1 else 100},
-                    'stage': 'preflop',
-                    'action_label': f'Raise to {bet_size_bb:.1f}BB'
-                })
+        # Determine if there was a raise by comparing raised amounts
+        # If one player has raised more than the other (beyond just the blind), there was a raise
+        if stage == 0:  # Preflop
+            # Check if user (player 0) raised beyond the big blind
+            if user_raised > big_blind:
+                bet_size_bb = user_raised / big_blind if big_blind > 0 else 0
+                # Detect open raise (2.5-4 BB is typical open raise range)
+                if bet_size_bb >= 2.0 and bet_size_bb <= 5.0:
+                    action_history.append({
+                        'player': 'user',
+                        'position': 'button',
+                        'action': 'raise',
+                        'bet_size_chips': user_raised,
+                        'bet_size_bb': bet_size_bb,
+                        'pot_before': small_blind + big_blind,
+                        'pot_after': pot,
+                        'stack_before': {'user': stakes[0] + user_raised if len(stakes) > 0 else 100,
+                                        'opponent': stakes[1] if len(stakes) > 1 else 100},
+                        'stack_after': {'user': stakes[0] if len(stakes) > 0 else 100,
+                                       'opponent': stakes[1] if len(stakes) > 1 else 100},
+                        'stage': 'preflop',
+                        'action_label': f'Raise to {bet_size_bb:.1f}BB'
+                    })
+            # Check if opponent (player 1) raised beyond the big blind (3-bet scenario)
+            elif opponent_raised > big_blind:
+                bet_size_bb = opponent_raised / big_blind if big_blind > 0 else 0
+                if bet_size_bb >= 2.0:
+                    action_history.append({
+                        'player': 'opponent',
+                        'position': 'big_blind',
+                        'action': 'raise',
+                        'bet_size_chips': opponent_raised,
+                        'bet_size_bb': bet_size_bb,
+                        'pot_before': small_blind + big_blind,
+                        'pot_after': pot,
+                        'stack_before': {'user': stakes[0] if len(stakes) > 0 else 100,
+                                        'opponent': stakes[1] + opponent_raised if len(stakes) > 1 else 100},
+                        'stack_after': {'user': stakes[0] if len(stakes) > 0 else 100,
+                                       'opponent': stakes[1] if len(stakes) > 1 else 100},
+                        'stage': 'preflop',
+                        'action_label': f'3-bet to {bet_size_bb:.1f}BB'
+                    })
         
         return action_history
     
@@ -545,7 +662,10 @@ class LLMOpponentAgent:
         """
         raw_obs = state.get('raw_obs', {})
         raw_legal_actions = state.get('raw_legal_actions', [])
-        
+
+        # Store original raised value before any modifications
+        original_raised = raw_obs.get('raised', [0, 0])
+
         # Extract opponent cards
         opponent_cards = self._extract_opponent_cards(state)
         
@@ -578,23 +698,71 @@ class LLMOpponentAgent:
             stage = stage.value
         elif not isinstance(stage, int):
             stage = int(stage) if stage else 0
-        
+
         stage_names = ['preflop', 'flop', 'turn', 'river']
         current_stage = stage_names[stage] if stage < len(stage_names) else 'preflop'
+
         
         # Get public cards (board)
         public_cards = raw_obs.get('public_cards', [])
-        public_cards_str = [self._card_index_to_string(card) for card in public_cards]
+        # Convert cards to strings - handle both integer indices and string formats
+        public_cards_str = []
+        for card in public_cards:
+            try:
+                # Handle RLCard Card objects
+                try:
+                    from rlcard.games.base import Card
+                    if isinstance(card, Card):
+                        # Convert Card object to index first, then to string
+                        card_index = card.get_index()
+                        public_cards_str.append(self._card_index_to_string(card_index))
+                        continue
+                except (ImportError, AttributeError):
+                    pass  # Not a Card object, continue with other checks
+                
+                if isinstance(card, str):
+                    # Card is already a string (e.g., "3h", "2h", "2d", "Jd" or "H3", "SA")
+                    # Normalize to consistent "Rank+Suit" format
+                    normalized = self._normalize_card_string(card)
+                    public_cards_str.append(normalized)
+                elif isinstance(card, (int, np.integer)):
+                    # Card is an integer index (0-51) - convert to string
+                    public_cards_str.append(self._card_index_to_string(int(card)))
+                else:
+                    # Try to convert to int first
+                    card_int = int(card)
+                    public_cards_str.append(self._card_index_to_string(card_int))
+            except (ValueError, TypeError, IndexError) as e:
+                logger.error(f"❌ [LLM_AGENT] Failed to convert board card {card} (type: {type(card)}) to string: {e}")
+                # Don't silently default to Ace - log error and skip invalid card
+                continue
+        
+        # Log board cards for debugging
+        if public_cards_str:
+            logger.info(f"🃏 [LLM_AGENT] Board cards: {public_cards_str} (from raw: {public_cards})")
+        else:
+            logger.warning(f"⚠️ [LLM_AGENT] No valid board cards found (raw: {public_cards})")
         
         # Get pot and stack info
         pot = raw_obs.get('pot', 0)
         big_blind = raw_obs.get('big_blind', 2)
         raised = raw_obs.get('raised', [0, 0])
-        
+
         # CRITICAL FIX: Use 'stakes' for remaining chips (not 'all_chips')
         # In RLCard, 'stakes' represents remained_chips (remaining stack after bets)
         # 'all_chips' may not be populated correctly or may represent something else
         stakes = raw_obs.get('stakes', [100, 100])  # Default to 100 chips if not available
+
+        # Store original raised value to check if it needs calculation
+        original_raised = raised[:] if isinstance(raised, list) and len(raised) == 2 else [0, 0]
+
+        # If raised field is missing (which it often is), calculate it from stakes
+        # raised represents total bets so far (equivalent to stakes in this context)
+        raised_is_default = (isinstance(original_raised, list) and len(original_raised) == 2 and original_raised[0] == 0 and original_raised[1] == 0)
+        if raised_is_default:  # raised is default [0,0], so use stakes as raised
+            # Use stakes as the raised amounts (total bets so far)
+            raised = stakes[:]
+            logger.debug(f"🔧 [LLM_AGENT] Using stakes as raised: stakes={stakes}, raised={raised}")
         
         pot_size_bb = pot / big_blind if big_blind > 0 else 0
         # Player 0 is user (button), Player 1 is opponent (big blind)
@@ -611,29 +779,92 @@ class LLMOpponentAgent:
         bet_to_call = max(0, opponent_raised - our_raised) if facing_bet else 0
         bet_to_call_bb = bet_to_call / big_blind if big_blind > 0 else 0
         
+        # Build action history (pass corrected raised values)
+        # Create a modified state with corrected raised values for action history building
+        state_for_history = state.copy()
+        if 'raw_obs' in state_for_history:
+            state_for_history['raw_obs'] = state_for_history['raw_obs'].copy()
+            state_for_history['raw_obs']['raised'] = raised  # Use corrected raised values
+        action_history = self._build_action_history(state_for_history)
+        
+        # Fallback: If facing a bet but no raise in action history, add it
+        # This ensures the LLM knows about prior raises even if detection failed
+        if facing_bet and current_stage == 'preflop':
+            # Check if action history already has a raise from user
+            has_user_raise = any(
+                action.get('player') == 'user' and action.get('action') == 'raise'
+                for action in action_history
+            )
+            if not has_user_raise and opponent_raised > big_blind:
+                bet_size_bb = opponent_raised / big_blind if big_blind > 0 else 0
+                # Determine user position
+                dealer_id = state.get('dealer_id')
+                if dealer_id is not None:
+                    user_is_dealer = (dealer_id == 0)
+                    user_position = 'big_blind' if user_is_dealer else 'button'
+                else:
+                    user_position = 'button'
+                
+                small_blind = big_blind // 2
+                action_history.append({
+                    'player': 'user',
+                    'position': user_position,
+                    'action': 'raise',
+                    'bet_size_chips': opponent_raised,
+                    'bet_size_bb': bet_size_bb,
+                    'pot_before': small_blind + big_blind,
+                    'pot_after': pot,
+                    'stack_before': {'user': user_stack + opponent_raised, 'opponent': opponent_stack},
+                    'stack_after': {'user': user_stack, 'opponent': opponent_stack},
+                    'stage': 'preflop',
+                    'action_label': f'Raise to {bet_size_bb:.1f}BB'
+                })
+                logger.info(f"🔧 [LLM_AGENT] Added missing raise to action history: {bet_size_bb:.1f}BB")
+        
         # Calculate pot odds if facing a bet
         pot_odds = 0.0
         if facing_bet and pot > 0:
             pot_odds = bet_to_call / (pot + bet_to_call) if (pot + bet_to_call) > 0 else 0
         
-        # Build action history
-        action_history = self._build_action_history(state)
-        
-        # Build legal actions labels
-        legal_actions_labels = {}
-        action_label_map = {
-            Action.FOLD: 'Fold',
-            Action.RAISE_HALF_POT: 'Raise ½ Pot',
-            Action.RAISE_POT: 'Raise Pot',
-            Action.ALL_IN: 'All-In'
-        }
-
-        # Dynamically set Check/Call label based on context
-        check_call_label = 'Check' if not facing_bet else 'Call'
-        action_label_map[Action.CHECK_CALL] = check_call_label
-
-        for action in raw_legal_actions:
-            legal_actions_labels[action] = action_label_map.get(action, f'Action {action}')
+        # Build legal actions labels using shared ActionLabeling module
+        # Note: We are player 1 (opponent), so we need to get context from opponent's perspective
+        # Create a mock env for context extraction (we'll pass None and extract manually)
+        try:
+            # Extract context using ActionLabeling (opponent is player 1)
+            context = ActionLabeling.get_context_from_state(state, player_id=1, env=None)
+            # Override facing_bet with our calculated value (more accurate)
+            context['is_facing_bet'] = facing_bet
+            button_labels = ActionLabeling.get_button_labels(context)
+            
+            # Map button labels to action values
+            legal_actions_labels = {}
+            for action in raw_legal_actions:
+                if action == Action.FOLD:
+                    legal_actions_labels[action] = 'Fold'
+                elif action == Action.CHECK_CALL:
+                    legal_actions_labels[action] = button_labels['checkCall']
+                elif action == Action.RAISE_HALF_POT:
+                    legal_actions_labels[action] = button_labels['raiseHalfPot']
+                elif action == Action.RAISE_POT:
+                    legal_actions_labels[action] = button_labels['raisePot']
+                elif action == Action.ALL_IN:
+                    legal_actions_labels[action] = 'All-In'
+                else:
+                    legal_actions_labels[action] = f'Action {action}'
+        except Exception as e:
+            # Fallback to original logic if ActionLabeling fails
+            logger.warning(f"Error using ActionLabeling in LLM opponent, using fallback: {e}")
+            legal_actions_labels = {}
+            action_label_map = {
+                Action.FOLD: 'Fold',
+                Action.RAISE_HALF_POT: 'Raise ½ Pot',
+                Action.RAISE_POT: 'Raise Pot',
+                Action.ALL_IN: 'All-In'
+            }
+            check_call_label = 'Check' if not facing_bet else 'Call'
+            action_label_map[Action.CHECK_CALL] = check_call_label
+            for action in raw_legal_actions:
+                legal_actions_labels[action] = action_label_map.get(action, f'Action {action}')
         
         # Pre-calculate analysis (optional but recommended for better decisions)
         opponent_range = None
@@ -850,40 +1081,59 @@ class LLMOpponentAgent:
 - Consider pre-calculated values (range, equity, pot odds)
 - Choose conservative action if unsure"""
     
-    def _get_tool_calling_schema(self, facing_bet=False):
+    def _get_tool_calling_schema(self, legal_actions_labels=None, legal_actions=None):
         """
         Define tool calling schema for select_poker_action tool.
+        Uses actual labeled actions (e.g., "3-bet to 10 BB") instead of generic types.
 
         Args:
-            facing_bet (bool): Whether the opponent is facing a bet
+            legal_actions_labels (dict): Dictionary mapping Action enums to their labels
+                e.g., {Action.FOLD: 'Fold', Action.CHECK_CALL: 'Call', Action.RAISE_HALF_POT: '3-bet to 10 BB'}
+            legal_actions (list, optional): List of legal Action enums to filter labels
 
         Returns:
             list: Tool schema list for OpenAI API
         """
-        # Determine available action types based on context
-        base_actions = ["fold", "raise_half_pot", "raise_pot", "all_in"]
-
-        # Add check or call based on whether facing a bet
-        if facing_bet:
-            base_actions.insert(0, "call")
-            check_call_description = "The type of action to take. 'call' matches the bet to continue playing. 'raise_half_pot' and 'raise_pot' are the available bet sizing options."
+        # If no labels provided, fall back to generic action types
+        if not legal_actions_labels:
+            base_actions = ["fold", "check", "call", "raise_half_pot", "raise_pot", "all_in"]
+            description = "The type of action to take. Select from the available legal actions shown in the context."
         else:
-            base_actions.insert(0, "check")
-            check_call_description = "The type of action to take. 'check' passes action to opponent. 'raise_half_pot' and 'raise_pot' are the available bet sizing options."
+            # Build enum from actual labels
+            # Only include labels for actions that are actually legal
+            action_labels = []
+            seen_labels = set()
+            
+            # Filter to only include labels for legal actions
+            for action, label in legal_actions_labels.items():
+                # Only include if action is legal (if legal_actions list provided)
+                if legal_actions is None or action in legal_actions:
+                    if label and label not in seen_labels:
+                        action_labels.append(label)
+                        seen_labels.add(label)
+            
+            # Ensure we have at least some actions
+            if not action_labels:
+                # Fallback to generic actions if no labels found
+                base_actions = ["fold", "check", "call", "raise_half_pot", "raise_pot", "all_in"]
+                description = "The type of action to take. Select from the available legal actions shown in the context."
+            else:
+                base_actions = action_labels
+                description = "The type of action to take. Select the EXACT label from the legal actions shown in the context (e.g., '3-bet to 10 BB', 'Call', 'Fold')."
 
         return [
             {
                 "type": "function",
                 "function": {
                     "name": "select_poker_action",
-                    "description": "Select optimal poker action from legal options using GTO principles.",
+                    "description": "Select optimal poker action from legal options using GTO principles. Use the EXACT label from the legal actions list.",
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "action_type": {
                                 "type": "string",
                                 "enum": base_actions,
-                                "description": check_call_description
+                                "description": description
                             },
                             "reasoning": {
                                 "type": "string",
@@ -925,9 +1175,10 @@ class LLMOpponentAgent:
                 {"role": "user", "content": formatted_context}
             ]
             
-            # Get tool calling schema (pass facing_bet context)
-            facing_bet = context.get('facing_bet', False)
-            tools = self._get_tool_calling_schema(facing_bet=facing_bet)
+            # Get tool calling schema (pass legal_actions_labels for actual labeled actions)
+            legal_actions_labels = context.get('legal_actions_labels', {})
+            legal_actions = context.get('legal_actions', [])
+            tools = self._get_tool_calling_schema(legal_actions_labels=legal_actions_labels, legal_actions=legal_actions)
             
             # Call LLM API with timeout
             try:
@@ -978,17 +1229,59 @@ class LLMOpponentAgent:
                 return self._call_llm_for_decision(context, retry_count + 1)
             return None
     
-    def _map_llm_action_to_rlcard(self, llm_action, legal_actions):
+    def _map_llm_action_to_rlcard(self, llm_action, legal_actions, legal_actions_labels=None):
         """
-        Map LLM tool call action to RLCard Action enum, with validation and fallback logic.
+        Map LLM tool call action (label string) to RLCard Action enum, with validation and fallback logic.
         
         Args:
-            llm_action (str): Action from LLM tool call
+            llm_action (str): Action label from LLM tool call (e.g., "3-bet to 10 BB", "Call", "Fold")
             legal_actions (list): List of legal RLCard Action enum values
+            legal_actions_labels (dict, optional): Dictionary mapping Action enums to their labels
         
         Returns:
             int: RLCard Action enum value
         """
+        # First, try to map using legal_actions_labels (preferred method)
+        if legal_actions_labels:
+            # Normalize strings for comparison (remove extra spaces, case-insensitive)
+            def normalize_label(s):
+                if not s:
+                    return ""
+                # Remove extra spaces, convert to lowercase
+                return " ".join(s.lower().split())
+            
+            llm_action_normalized = normalize_label(llm_action)
+            
+            # Find the Action enum that matches this label
+            for action, label in legal_actions_labels.items():
+                if label:
+                    label_normalized = normalize_label(label)
+                    if label_normalized == llm_action_normalized:
+                        if action in legal_actions:
+                            logger.info(f"Mapped LLM action '{llm_action}' to Action enum {action} via label '{label}'")
+                            return action
+                        else:
+                            logger.warning(f"LLM selected '{llm_action}' which maps to {action}, but it's not in legal_actions")
+            
+            # If exact match failed, try partial matching for common patterns
+            # This handles cases where LLM might return slightly different formatting
+            for action, label in legal_actions_labels.items():
+                if label:
+                    label_normalized = normalize_label(label)
+                    # Check if the core action matches (e.g., "3-bet to 10 bb" matches "3-bet to 10BB")
+                    # Extract key words from both labels
+                    llm_words = set(llm_action_normalized.split())
+                    label_words = set(label_normalized.split())
+                    
+                    # If most words match (at least 2 words in common for multi-word labels)
+                    if len(llm_words) >= 2 and len(label_words) >= 2:
+                        common_words = llm_words.intersection(label_words)
+                        if len(common_words) >= 2:  # At least 2 words match
+                            if action in legal_actions:
+                                logger.info(f"Mapped LLM action '{llm_action}' to Action enum {action} via partial label match '{label}'")
+                                return action
+        
+        # Fallback: try generic action type mapping (for backward compatibility)
         action_map = {
             "fold": Action.FOLD,
             "call": Action.CHECK_CALL,
@@ -998,27 +1291,37 @@ class LLMOpponentAgent:
             "all_in": Action.ALL_IN
         }
         
-        rlcard_action = action_map.get(llm_action)
+        rlcard_action = action_map.get(llm_action.lower())
         
         # Validate action is legal
+        if rlcard_action and rlcard_action in legal_actions:
+            return rlcard_action
+        
+        # If action not found or illegal, try fallback logic
         if rlcard_action not in legal_actions:
             # Fallback Priority (try alternatives before giving up):
             # 1. If raise_half_pot illegal but raise_pot legal → use raise_pot
-            if llm_action == "raise_half_pot" and Action.RAISE_POT in legal_actions:
-                logger.info(f"LLM selected {llm_action} but it's illegal, using RAISE_POT instead")
-                return Action.RAISE_POT
+            if llm_action.lower() in ["raise_half_pot", "raise to 3 bb", "3-bet to 10 bb", "bet ½ pot"]:
+                if Action.RAISE_POT in legal_actions:
+                    logger.info(f"LLM selected {llm_action} but RAISE_HALF_POT illegal, using RAISE_POT instead")
+                    return Action.RAISE_POT
+                elif Action.RAISE_HALF_POT in legal_actions:
+                    logger.info(f"LLM selected {llm_action}, using RAISE_HALF_POT")
+                    return Action.RAISE_HALF_POT
             # 2. If raise_pot illegal but raise_half_pot legal → use raise_half_pot
-            elif llm_action == "raise_pot" and Action.RAISE_HALF_POT in legal_actions:
-                logger.info(f"LLM selected {llm_action} but it's illegal, using RAISE_HALF_POT instead")
-                return Action.RAISE_HALF_POT
+            elif llm_action.lower() in ["raise_pot", "raise pot", "bet ⅔ pot"]:
+                if Action.RAISE_HALF_POT in legal_actions:
+                    logger.info(f"LLM selected {llm_action} but RAISE_POT illegal, using RAISE_HALF_POT instead")
+                    return Action.RAISE_HALF_POT
+                elif Action.RAISE_POT in legal_actions:
+                    logger.info(f"LLM selected {llm_action}, using RAISE_POT")
+                    return Action.RAISE_POT
             # 3. If call/check illegal but CHECK_CALL legal → use CHECK_CALL (shouldn't happen, but safe)
-            elif llm_action in ["call", "check"] and Action.CHECK_CALL in legal_actions:
-                logger.info(f"LLM selected {llm_action} but it's illegal, using CHECK_CALL instead")
+            elif llm_action.lower() in ["call", "check"] and Action.CHECK_CALL in legal_actions:
+                logger.info(f"LLM selected {llm_action}, using CHECK_CALL")
                 return Action.CHECK_CALL
-            # 4. Last resort: return first legal action
-            else:
-                logger.warning(f"LLM selected illegal action {llm_action}, using first legal action: {legal_actions[0]}")
-                return legal_actions[0]
         
-        return rlcard_action
+        # Last resort: return first legal action
+        logger.warning(f"LLM selected action '{llm_action}' which couldn't be mapped, using first legal action: {legal_actions[0]}")
+        return legal_actions[0]
 
