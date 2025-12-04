@@ -1,0 +1,13 @@
+# Memory bank and planning folders
+memory-bank/
+planning/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# All markdown files except README
+*.md
+!README.md
+!README*

@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>No Limit Texas Hold'em - RLCard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>No Limit Texas Hold'em</h1>
+            <div class="menu" role="toolbar" aria-label="Game controls">
+                <button id="newGameBtn" class="btn-menu" aria-label="Start a new hand">New Hand</button>
+                <button id="helpBtn" class="btn-menu" aria-label="Show help information">Help</button>
+            </div>
+        </header>
+
+        <!-- Left Sidebar: Action History -->
+        <div class="left-sidebar" role="complementary" aria-label="Action History">
+            <div class="action-tracker">
+                <div class="action-tracker-header">Action History</div>
+                <div id="actionHistory" class="action-history-list" role="log" aria-label="Game action history" aria-live="polite"></div>
+            </div>
+        </div>
+
+        <div class="game-table">
+
+            <!-- Opponent Section -->
+            <div class="player-section opponent-section">
+                <div class="turn-indicator">Turn</div>
+                <div class="player-header">
+                    <svg id="opponentDealerChip" class="dealer-chip-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <circle cx="12" cy="12" r="10" fill="#FFD700" stroke="#FFA500" stroke-width="2"/>
+                        <circle cx="12" cy="12" r="7" fill="#FFED4E" stroke="#FFA500" stroke-width="1"/>
+                        <text x="12" y="16" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#8B4513">D</text>
+                    </svg>
+                    <div class="player-label">Opponent</div>
+                </div>
+                <div id="opponentChips" class="chips-display">50.0 BB</div>
+                <div class="cards-wrapper">
+                    <div id="opponentCards" class="cards-container"></div>
+                </div>
+                <div id="opponentBetAmount" class="bet-amount-display">
+                    <div class="bet-value"></div>
+                </div>
+            </div>
+
+            <!-- Community Cards Section -->
+            <div class="community-section">
+                <div id="potDisplay" class="pot-display">Pot: 0.0 BB</div>
+                <div id="communityCards" class="cards-container community-cards"></div>
+                <div id="stageDisplay" class="stage-display">Preflop</div>
+            </div>
+
+            <!-- Player Section -->
+            <div class="player-section player-section-bottom">
+                <div class="turn-indicator">Turn</div>
+                <div id="playerBetAmount" class="bet-amount-display">
+                    <div class="bet-value"></div>
+                </div>
+                <div class="cards-wrapper">
+                    <div id="playerCards" class="cards-container"></div>
+                </div>
+                <div id="playerChips" class="chips-display">50.0 BB</div>
+                <div class="player-header">
+                    <svg id="playerDealerChip" class="dealer-chip-icon" width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg" style="display: none;">
+                        <circle cx="12" cy="12" r="10" fill="#FFD700" stroke="#FFA500" stroke-width="2"/>
+                        <circle cx="12" cy="12" r="7" fill="#FFED4E" stroke="#FFA500" stroke-width="1"/>
+                        <text x="12" y="16" font-family="Arial, sans-serif" font-size="10" font-weight="bold" text-anchor="middle" fill="#8B4513">D</text>
+                    </svg>
+                    <div class="player-label">You</div>
+                </div>
+            </div>
+
+            <!-- Status Display -->
+            <div id="statusDisplay" class="status-display">Waiting to start...</div>
+
+            <!-- Action Buttons -->
+            <div id="actionButtons" class="action-buttons" role="group" aria-label="Player actions">
+                <button id="foldBtn" class="action-btn" data-action="0" aria-label="Fold - Give up the hand">Fold</button>
+                <button id="callBtn" class="action-btn" data-action="1" aria-label="Check or Call - Match the current bet">Check/Call</button>
+                <button id="raiseHalfBtn" class="action-btn" data-action="2" aria-label="Raise Half Pot - Raise by half the pot size">Raise ½ Pot</button>
+                <button id="raisePotBtn" class="action-btn" data-action="3" aria-label="Raise Pot - Raise by the full pot size">Raise Pot</button>
+                <button id="allInBtn" class="action-btn" data-action="4" aria-label="All-In - Bet all remaining chips">All-In</button>
+            </div>
+        </div>
+
+        <!-- Game Over Modal -->
+        <div id="gameOverModal" class="modal">
+            <div class="modal-content">
+                <h2 id="gameOverTitle">Game Over</h2>
+                <div id="gameOverMessage"></div>
+                <button id="closeModalBtn" class="btn-primary">Close</button>
+            </div>
+        </div>
+
+        <!-- Help Modal -->
+        <div id="helpModal" class="modal">
+            <div class="modal-content">
+                <h2>How to Play</h2>
+                <div class="help-content">
+                    <h3>Rules:</h3>
+                    <ul>
+                        <li>Each player receives 2 cards (hole cards)</li>
+                        <li>Community cards are dealt: 3 (Flop), 1 (Turn), 1 (River)</li>
+                        <li>Players can:
+                            <ul>
+                                <li><strong>Fold:</strong> Give up the hand</li>
+                                <li><strong>Check/Call:</strong> Match the current bet or check if no bet</li>
+                                <li><strong>Raise ½ Pot:</strong> Raise by half the pot size</li>
+                                <li><strong>Raise Pot:</strong> Raise by the full pot size</li>
+                                <li><strong>All-In:</strong> Bet all remaining chips</li>
+                            </ul>
+                        </li>
+                        <li>Best 5-card hand wins at showdown</li>
+                    </ul>
+                </div>
+                <button id="closeHelpBtn" class="btn-primary">Close</button>
+            </div>
+        </div>
+
+        <!-- AI Coach Chat Interface -->
+        <div id="chatContainer" class="chat-container" role="complementary" aria-label="AI Coach Chat Interface">
+            <div class="chat-header">
+                <h3>AI Coach</h3>
+            </div>
+            <div id="chatHistory" class="chat-history" role="log" aria-label="Chat messages" aria-live="polite" aria-atomic="false"></div>
+            <div id="chatTypingIndicator" class="chat-typing-indicator" style="display: none;" aria-live="polite" aria-atomic="true">
+                <span class="typing-dots" aria-hidden="true">
+                    <span>.</span><span>.</span><span>.</span>
+                </span>
+                <span>Coach is typing...</span>
+            </div>
+            <div class="chat-input-container">
+                <input type="text" id="chatInput" class="chat-input" placeholder="Ask a question..." maxlength="500" aria-label="Chat input" aria-describedby="chatInputHint">
+                <span id="chatInputHint" class="sr-only">Type your question and press Enter or click Send</span>
+                <button id="chatSendBtn" class="chat-send-btn" aria-label="Send message">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='coach.js') }}"></script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
+
