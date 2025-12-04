@@ -6,6 +6,21 @@ planning/
 .env
 .env.local
 .env.*.local
+.env.example
+
+# Python cache and virtual environment
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+ENV/
+env/
+
+# pytest cache
+.pytest_cache/
 
 # All markdown files except README
 *.md
