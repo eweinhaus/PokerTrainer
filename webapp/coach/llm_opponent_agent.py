@@ -16,7 +16,12 @@ import json
 import numpy as np
 from typing import Dict, List, Optional, Any, Tuple
 from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except Exception as e:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 # Import RLCard Action enum
@@ -32,10 +37,13 @@ except ImportError:
         ALL_IN = 4
 
 # Load environment variables
-load_dotenv()
+try:
+    load_dotenv()
+except (PermissionError, FileNotFoundError):
+    # .env file not accessible, continue with system environment variables
+    pass
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -87,8 +95,17 @@ class LLMOpponentAgent:
             with open(os.path.join(rlcard.__path__[0], 'games/limitholdem/card2index.json'), 'r') as file:
                 self.card2index = json.load(file)
         except Exception as e:
-            logger.warning(f"🃏 Could not load card2index mapping: {e}. Card extraction may fail.")
+            logger.warning(f"🃏 Could not load card2index mapping: {e}. Using fallback mapping.")
+            # Fallback card2index mapping for basic poker cards
+            # Format: [rank][suit] where rank: 2-9,T,J,Q,K,A and suit: S,H,D,C
             self.card2index = {}
+            suits = ['S', 'H', 'D', 'C']
+            ranks = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']
+            card_index = 0
+            for rank in ranks:
+                for suit in suits:
+                    self.card2index[f"{rank}{suit}"] = card_index
+                    card_index += 1
     
     def _init_llm_client(self):
         """
@@ -133,7 +150,11 @@ class LLMOpponentAgent:
                     self.api_key_available = False
 
         elif llm_provider == "openai":
-            if not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
+            if not OPENAI_AVAILABLE:
+                logger.error("OpenAI library not available. Cannot use OpenAI provider.")
+                self.client = None
+                self.api_key_available = False
+            elif not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
                 logger.error("LLM_PROVIDER is set to 'openai' but OPENAI_API_KEY is not configured or using placeholder.")
                 self.client = None
                 self.api_key_available = False
@@ -425,41 +446,62 @@ class LLMOpponentAgent:
         # Use 'stakes' for remaining chips (not 'all_chips')
         stakes = raw_obs.get('stakes', [100, 100])  # Default to 100 chips if not available
         
-        # In heads-up, player 0 is button, player 1 is big blind (opponent)
+        # Determine positions based on dealer_id (for heads-up poker)
+        dealer_id = state.get('dealer_id')
+        if dealer_id is not None:
+            # In heads-up: dealer is BB, non-dealer is SB (button)
+            user_is_dealer = (dealer_id == 0)  # User is player 0
+            if user_is_dealer:
+                user_position = 'big_blind'
+                opponent_position = 'button'  # SB
+                sb_player = 'opponent'
+                bb_player = 'user'
+            else:  # opponent is dealer
+                user_position = 'button'  # SB
+                opponent_position = 'big_blind'
+                sb_player = 'user'
+                bb_player = 'opponent'
+        else:
+            # Fallback to hardcoded positions if dealer_id not available
+            sb_player = 'user'
+            bb_player = 'opponent'
+            user_position = 'button'
+            opponent_position = 'big_blind'
+
         # We can infer some action history from raised amounts and pot size
         # This is a simplified version - full implementation would track actions as they occur
-        
+
         # Add blinds as first actions
         small_blind = big_blind // 2
         if pot >= small_blind + big_blind:
             action_history.append({
-                'player': 'user',
-                'position': 'button',
+                'player': sb_player,
+                'position': 'button',  # SB is always button in heads-up
                 'action': 'blind',
                 'bet_size_chips': small_blind,
                 'bet_size_bb': small_blind / big_blind if big_blind > 0 else 0,
                 'pot_before': 0,
                 'pot_after': small_blind + big_blind,
-                'stack_before': {'user': stakes[0] + small_blind if len(stakes) > 0 else 100, 
-                                'opponent': stakes[1] if len(stakes) > 1 else 100},
-                'stack_after': {'user': stakes[0] if len(stakes) > 0 else 100,
-                               'opponent': stakes[1] if len(stakes) > 1 else 100},
+                'stack_before': {'user': stakes[0] + small_blind if sb_player == 'user' else stakes[0],
+                                'opponent': stakes[1] + small_blind if sb_player == 'opponent' else stakes[1]},
+                'stack_after': {'user': stakes[0] if sb_player == 'user' else stakes[0],
+                               'opponent': stakes[1] if sb_player == 'opponent' else stakes[1]},
                 'stage': 'preflop',
                 'action_label': f'Small Blind {small_blind} chips'
             })
-            
+
             action_history.append({
-                'player': 'opponent',
+                'player': bb_player,
                 'position': 'big_blind',
                 'action': 'blind',
                 'bet_size_chips': big_blind,
                 'bet_size_bb': 1.0,
                 'pot_before': small_blind,
                 'pot_after': small_blind + big_blind,
-                'stack_before': {'user': stakes[0] if len(stakes) > 0 else 100,
-                                'opponent': stakes[1] + big_blind if len(stakes) > 1 else 100},
-                'stack_after': {'user': stakes[0] if len(stakes) > 0 else 100,
-                               'opponent': stakes[1] if len(stakes) > 1 else 100},
+                'stack_before': {'user': stakes[0] + big_blind if bb_player == 'user' else stakes[0],
+                                'opponent': stakes[1] + big_blind if bb_player == 'opponent' else stakes[1]},
+                'stack_after': {'user': stakes[0] if bb_player == 'user' else stakes[0],
+                               'opponent': stakes[1] if bb_player == 'opponent' else stakes[1]},
                 'stage': 'preflop',
                 'action_label': f'Big Blind {big_blind} chips'
             })
@@ -649,11 +691,29 @@ class LLMOpponentAgent:
             logger.warning(f"Error in pre-calculated analysis: {e}")
             # Continue without pre-calculated values
         
+        # Determine positions based on dealer_id (for heads-up poker)
+        dealer_id = state.get('dealer_id')
+        if dealer_id is not None:
+            # In heads-up: dealer is BB, non-dealer is SB (button)
+            user_is_dealer = (dealer_id == 0)  # User is player 0
+            opponent_is_dealer = (dealer_id == 1)  # Opponent is player 1
+
+            if user_is_dealer:
+                user_position = 'big_blind'
+                opponent_position = 'button'  # SB
+            else:  # opponent is dealer
+                user_position = 'button'  # SB
+                opponent_position = 'big_blind'
+        else:
+            # Fallback to hardcoded positions if dealer_id not available
+            user_position = 'button'
+            opponent_position = 'big_blind'
+
         # Build context dictionary
         context = {
             'opponent_cards': opponent_cards_str,
-            'user_position': 'button',
-            'opponent_position': 'big_blind',
+            'user_position': user_position,
+            'opponent_position': opponent_position,
             'current_stage': current_stage,
             'public_cards': public_cards_str,
             'pot_size': pot,
@@ -764,19 +824,24 @@ class LLMOpponentAgent:
 
         return "\n".join(lines)
     
-    def _build_system_prompt(self):
+    def _build_system_prompt(self, opponent_position='big_blind'):
         """
         Build concise system prompt that guides LLM to make GTO-optimal decisions.
+
+        Args:
+            opponent_position (str): The opponent's position ('button' for SB, 'big_blind' for BB)
 
         Returns:
             str: System prompt text
         """
-        return """You are an expert NLHE poker player making GTO decisions.
+        position_description = "BB (out of position)" if opponent_position == 'big_blind' else "SB (button, in position)"
+
+        return f"""You are an expert NLHE poker player making GTO decisions.
 
 **Core Principles:**
 - Range-based thinking: Consider opponent ranges based on action history
 - Pot odds vs equity: Call when equity > pot odds
-- Position: You are BB (out of position) - be conservative
+- Position: You are {position_description} - {"be conservative" if opponent_position == 'big_blind' else "be aggressive"}
 - Stack depth: <20BB aggressive, >100BB more postflop play
 
 **Rules:**
@@ -848,7 +913,8 @@ class LLMOpponentAgent:
         
         try:
             # Build system prompt
-            system_prompt = self._build_system_prompt()
+            opponent_position = context.get('opponent_position', 'big_blind')
+            system_prompt = self._build_system_prompt(opponent_position)
             
             # Format context for prompt
             formatted_context = self._format_context_for_prompt(context)

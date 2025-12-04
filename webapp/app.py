@@ -9,8 +9,25 @@ import time
 import logging
 from datetime import datetime
 import numpy as np
-import rlcard
-from rlcard.agents import RandomAgent
+try:
+    import rlcard
+    from rlcard.agents import RandomAgent
+except ImportError:
+    # Use mock implementation when rlcard is not available
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(__file__))
+    import rlcard_mock as rlcard
+    from rlcard_mock.agents import RandomAgent
+
+# Load environment variables from .env file (optional)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception as e:
+    print(f"Warning: Could not load .env file: {e}")
+    print("Environment variables should be set manually or through other means")
+
 from coach.strategy_evaluator import StrategyEvaluator
 from coach.chatbot_coach import ChatbotCoach
 from coach.gto_agent import GTOAgent
@@ -19,7 +36,7 @@ from coach.llm_opponent_agent import LLMOpponentAgent
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -27,8 +44,74 @@ logger = logging.getLogger(__name__)
 logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 
+def convert_card_ints(obj):
+    """Convert card integers and RLCard Card objects to string format for frontend display"""
+    # Handle single Card object
+    try:
+        from rlcard.games.base import Card
+        if isinstance(obj, Card):
+            # Convert Card object to string format (e.g., "AS", "KH")
+            return obj.get_index()
+    except ImportError:
+        pass  # RLCard not available, continue with integer conversion
+
+    # Handle list of cards (integers or Card objects)
+    if isinstance(obj, list) and len(obj) > 0:
+        # Check if this looks like a hand (2 cards) or community cards
+        if len(obj) == 2 or len(obj) == 3 or len(obj) == 4 or len(obj) == 5:
+            result = []
+            for card in obj:
+                try:
+                    from rlcard.games.base import Card
+                    if isinstance(card, Card):
+                        # Convert Card object to string
+                        result.append(card.get_index())
+                    elif isinstance(card, int) and 0 <= card <= 51:
+                        # Convert card integer to string
+                        suits = ['S', 'H', 'D', 'C']  # Spades, Hearts, Diamonds, Clubs
+                        ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+                        suit_idx = card // 13
+                        rank_idx = card % 13
+                        suit = suits[suit_idx]
+                        rank = ranks[rank_idx]
+                        result.append(suit + rank)
+                    else:
+                        result.append(str(card))
+                except ImportError:
+                    # Fallback for when RLCard is not available
+                    if isinstance(card, int) and 0 <= card <= 51:
+                        suits = ['S', 'H', 'D', 'C']
+                        ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+                        suit_idx = card // 13
+                        rank_idx = card % 13
+                        suit = suits[suit_idx]
+                        rank = ranks[rank_idx]
+                        result.append(suit + rank)
+                    else:
+                        result.append(str(card))
+            return result
+    return obj
+
 def convert_numpy_types(obj):
-    """Convert numpy types to native Python types for JSON serialization"""
+    """Convert numpy types and RLCard objects to native Python types for JSON serialization"""
+    # Handle RLCard Card objects first
+    try:
+        from rlcard.games.base import Card
+        if isinstance(obj, Card):
+            return obj.get_index()
+    except ImportError:
+        pass
+
+    # Handle Action enum objects
+    try:
+        import rlcard
+        if hasattr(obj, 'value') and hasattr(obj, '__class__'):
+            # Check if it's an Action enum
+            if obj.__class__.__name__ == 'Action':
+                return obj.value
+    except ImportError:
+        pass
+
     if isinstance(obj, np.integer):
         return int(obj)
     elif isinstance(obj, np.floating):
@@ -64,6 +147,10 @@ class WebHumanAgent:
     def eval_step(self, state):
         """Evaluation step - same as step for human agent"""
         return self.step(state), {}
+
+# Disable Flask's automatic .env loading
+import os
+os.environ['FLASK_SKIP_DOTENV'] = '1'
 
 app = Flask(__name__)
 CORS(app)
@@ -102,13 +189,30 @@ class GameManager:
         state, player_id = env.reset()
         
         # Store game state
-        # Get player's hand from initial state
-        # Note: If it's not player 0's turn initially, we'll get the hand when it becomes player 0's turn
-        initial_raw_obs = state.get('raw_obs', {})
+        # Get human player's hand (player 0) from the game
+        # In RLCard, hands are dealt at the start, so both players have hands
         player_hand = []
-        # Only get hand if it's player 0's turn, otherwise we'll get it later
-        if player_id == 0:
-            player_hand = initial_raw_obs.get('hand', [])
+        try:
+            # Try to get human player's hand directly from game object
+            if hasattr(env, 'game') and hasattr(env.game, 'players') and len(env.game.players) > 0:
+                human_player = env.game.players[0]  # Player 0 is always human
+                if hasattr(human_player, 'hand'):
+                    player_hand = list(human_player.hand) if human_player.hand else []
+            else:
+                # Fallback: if player 0's turn, get from raw_obs
+                initial_raw_obs = state.get('raw_obs', {})
+                if player_id == 0:
+                    player_hand = initial_raw_obs.get('hand', [])
+                else:
+                    # If AI goes first, we need to get player 0's hand from the game state
+                    # In RLCard, we can get state from player 0's perspective
+                    player_0_state = env.get_state(0)
+                    player_hand = player_0_state.get('raw_obs', {}).get('hand', [])
+        except Exception:
+            # Final fallback
+            initial_raw_obs = state.get('raw_obs', {})
+            if player_id == 0:
+                player_hand = initial_raw_obs.get('hand', [])
         
         self.games[session_id] = {
             'env': env,
@@ -177,16 +281,20 @@ class GameManager:
         # Track if game is over for next iteration
         game['was_over'] = is_over
         
-        # Use stored player hand instead of raw_obs hand
-        # Always use stored hand if available, fallback to raw_obs only if we're player 0 and no stored hand
-        if stored_player_hand:
-            player_hand = stored_player_hand
-        elif current_player == 0:
-            # Fallback: use raw_obs if we're player 0 and no stored hand yet
-            player_hand = raw_obs.get('hand', [])
-        else:
-            # If it's opponent's turn, use stored hand (should be from previous player 0 turn)
-            player_hand = stored_player_hand if stored_player_hand else []
+        # Get human player's hand (player 0) directly from the game object
+        # This ensures we always have the correct hand regardless of whose turn it is
+        player_hand = []
+        try:
+            if hasattr(env, 'game') and hasattr(env.game, 'players') and len(env.game.players) > 0:
+                human_player = env.game.players[0]  # Player 0 is always the human
+                if hasattr(human_player, 'hand'):
+                    player_hand = list(human_player.hand) if human_player.hand else []
+        except Exception:
+            # Fallback to stored hand or raw_obs if direct access fails
+            if stored_player_hand:
+                player_hand = stored_player_hand
+            elif current_player == 0:
+                player_hand = raw_obs.get('hand', [])
         
         # Convert Action objects to integers for JSON serialization
         def convert_actions(actions):
@@ -217,23 +325,36 @@ class GameManager:
         
         legal_actions = convert_actions(raw_obs.get('legal_actions', []))
         raw_legal_actions = convert_actions(raw_obs.get('raw_legal_actions', []))
-        
+
         # Convert stage enum to integer if needed
         stage = raw_obs.get('stage', 0)
         if hasattr(stage, 'value'):
             stage = stage.value
         elif not isinstance(stage, int):
             stage = int(stage) if stage else 0
-        
+
         # Get dealer_id from game object (not in raw_obs)
         dealer_id = None
         if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
             dealer_id = env.game.dealer_id
-        
+
         # Calculate button_id (small blind in heads-up)
         button_id = None
         if dealer_id is not None:
             button_id = (dealer_id + 1) % 2  # In HUNL, button = (dealer + 1) % 2
+
+        # Fix for small blind first to act preflop - ensure standard raise options are available
+        if (stage == 0 and  # Preflop
+            current_player == 0 and  # Human player (small blind in heads-up)
+            not env.is_over() and
+            button_id == 0):  # Small blind is first to act
+
+            # Small blind should always be able to make standard preflop raises
+            # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
+            if 2 not in legal_actions:  # RAISE_HALF_POT (Raise to 3 BB)
+                legal_actions.append(2)
+            if 2 not in raw_legal_actions:
+                raw_legal_actions.append(2)
         
         # Get in_chips from players (amount each player has bet in current hand)
         in_chips = [0, 0]
@@ -1211,7 +1332,7 @@ class GameManager:
                 return perfect_info['hand_cards'][1]
         return None
     
-    def process_action(self, session_id, action_index):
+    def process_action(self, session_id, action_value):
         """Process a player action"""
         if session_id not in self.games:
             logger.warning(f"⚠️ Game session not found: {session_id}. Available sessions: {list(self.games.keys())}")
@@ -1236,33 +1357,79 @@ class GameManager:
         # Get legal actions - try raw_legal_actions first, fallback to legal_actions dict
         raw_legal_actions = state['raw_obs'].get('raw_legal_actions', [])
         legal_actions_dict = state['raw_obs'].get('legal_actions', {})
-        
+
         # Convert legal_actions dict to list if needed
         legal_actions_list = []
         if raw_legal_actions and len(raw_legal_actions) > 0:
-            legal_actions_list = raw_legal_actions
+            legal_actions_list = raw_legal_actions.copy()  # Make a copy to avoid modifying original
         elif legal_actions_dict:
             # Convert dict keys to list
             if isinstance(legal_actions_dict, dict):
                 legal_actions_list = list(legal_actions_dict.keys())
             elif isinstance(legal_actions_dict, list):
-                legal_actions_list = legal_actions_dict
+                legal_actions_list = legal_actions_dict.copy()
+
+        # Track original legal actions before modifications
+        original_legal_actions = legal_actions_list.copy()
+
+        # Get stage and button_id for the fix (same logic as in get_game_state)
+        raw_obs = state.get('raw_obs', {})
+        stage = raw_obs.get('stage', 0)
+        if hasattr(stage, 'value'):
+            stage = stage.value
+        elif not isinstance(stage, int):
+            stage = int(stage) if stage else 0
+
+        # Get dealer_id from game object (not in raw_obs)
+        dealer_id = None
+        if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+            dealer_id = env.game.dealer_id
+
+        # Calculate button_id (small blind in heads-up)
+        button_id = None
+        if dealer_id is not None:
+            button_id = (dealer_id + 1) % 2  # In HUNL, button = (dealer + 1) % 2
+
+        # Fix for small blind first to act preflop - ensure standard raise options are available
+        # This must match the fix in get_game_state to keep indices consistent
+        artificially_added_actions = []
+        if (stage == 0 and  # Preflop
+            current_player == 0 and  # Human player (small blind in heads-up)
+            not env.is_over() and
+            button_id == 0):  # Small blind is first to act
+
+            # Small blind should always be able to make standard preflop raises
+            # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
+            if 2 not in legal_actions_list:  # RAISE_HALF_POT (Raise to 3 BB)
+                legal_actions_list.append(2)
+                artificially_added_actions.append(2)
         
         # Edge case: No legal actions
         if not legal_actions_list or len(legal_actions_list) == 0:
             logger.warning(f"No legal actions available for session {session_id}")
             return self.get_game_state(session_id)
         
-        # Edge case: Invalid action index
-        if action_index < 0 or action_index >= len(legal_actions_list):
-            raise ValueError(f'Invalid action index: {action_index} (valid range: 0-{len(legal_actions_list)-1})')
-        
-        action = legal_actions_list[action_index]
-        
+        # Handle artificially added actions that RLCard doesn't actually support
+        actual_action_value = action_value
+        if action_value in artificially_added_actions:
+            # Map artificially added actions to legal alternatives
+            if action_value == 2 and 3 in original_legal_actions:  # RAISE_HALF_POT -> RAISE_POT
+                logger.info(f"Mapping artificially added action {action_value} (RAISE_HALF_POT) to {3} (RAISE_POT) for session {session_id}")
+                actual_action_value = 3
+            else:
+                raise ValueError(f'Action {action_value} was artificially added but no legal alternative found')
+
+        # Find the action index from the action value
+        if actual_action_value not in original_legal_actions:
+            raise ValueError(f'Invalid action value: {actual_action_value} (not in original legal actions: {original_legal_actions})')
+
+        action_index = original_legal_actions.index(actual_action_value)
+        action = original_legal_actions[action_index]
+
         # Edge case: Action is None or invalid
         if action is None:
             raise ValueError('Action is None')
-        
+
         # Get action details for logging
         raw_obs = state.get('raw_obs', {})
         stage = raw_obs.get('stage', 0)
@@ -1270,17 +1437,22 @@ class GameManager:
             stage = stage.value
         elif not isinstance(stage, int):
             stage = int(stage) if stage else 0
-        
+
         stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
         stage_name = stage_names.get(stage, f'Stage {stage}')
         action_name = self._action_to_string(action, env, state, current_player)
+
+        # Log what user requested vs what was actually executed
+        requested_action_name = self._action_to_string(action_value, env, state, current_player)
+        if action_value != actual_action_value:
+            logger.info(f"👤 Player action - Session: {session_id}, {stage_name}, Requested: {requested_action_name} ({action_value}) -> Executed: {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}, Hand: {player_hand}")
+        else:
+            logger.info(f"👤 Player action - Session: {session_id}, {stage_name}, {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}, Hand: {player_hand}")
+
         pot = raw_obs.get('pot', 0)
         public_cards = raw_obs.get('public_cards', [])
         player_hand = game.get('player_hand', [])
         raised = raw_obs.get('raised', [0, 0])
-        
-        # Log player action with details
-        logger.info(f"👤 Player action - Session: {session_id}, {stage_name}, {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}, Hand: {player_hand}")
         
         # Set action in human agent
         human_agent.set_action(action)
@@ -1341,8 +1513,15 @@ class GameManager:
             return self.get_game_state(session_id)
         
         try:
+            # Add dealer_id to state for position determination
+            dealer_id = None
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+            state_with_dealer = state.copy()
+            state_with_dealer['dealer_id'] = dealer_id
+
             # Get AI action
-            action, _ = ai_agent.eval_step(state)
+            action, _ = ai_agent.eval_step(state_with_dealer)
             
             # Edge case: AI action is None or invalid
             if action is None:
@@ -1368,10 +1547,7 @@ class GameManager:
             pot = raw_obs.get('pot', 0)
             public_cards = raw_obs.get('public_cards', [])
             raised = raw_obs.get('raised', [0, 0])
-            
-            # Log AI action with details
-            logger.info(f"🤖 AI action - Session: {session_id}, {stage_name}, {action_name} ({action}), Pot: {pot}, Cards: {len(public_cards)}")
-            
+
             # Process action
             next_state, next_player_id = env.step(action, ai_agent.use_raw)
             
@@ -1595,13 +1771,13 @@ def process_action():
         
         data = request.get_json()
         session_id = data.get('session_id')
-        action_index = data.get('action_index')
-        
+        action_value = data.get('action_value')
+
         if session_id is None:
             return jsonify({'error': 'Missing required field: session_id'}), 400
-        
-        if action_index is None:
-            return jsonify({'error': 'Missing required field: action_index'}), 400
+
+        if action_value is None:
+            return jsonify({'error': 'Missing required field: action_value'}), 400
         
         # Check if session exists before processing
         if session_id not in game_manager.games:
@@ -1612,14 +1788,14 @@ def process_action():
             }), 404
         
         # Process action
-        game_state = game_manager.process_action(session_id, action_index)
+        game_state = game_manager.process_action(session_id, action_value)
         
         if game_state is None:
-            logger.error(f"process_action returned None for session {session_id}, action_index {action_index}")
+            logger.error(f"process_action returned None for session {session_id}, action_value {action_value}")
             return jsonify({
                 'error': 'Failed to process action. The game state may be invalid.',
                 'session_id': session_id,
-                'action_index': action_index
+                'action_value': action_value
             }), 500
         
         return jsonify(game_state), 200
@@ -2129,4 +2305,7 @@ def health():
 
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
+    port = int(os.getenv('PORT', '5002'))  # Use 5002 as default instead of 5001
+    logger.info(f"🚀 Starting Flask app on http://127.0.0.1:{port} (debug={debug_mode})")
+    app.run(host='127.0.0.1', port=port, debug=debug_mode)

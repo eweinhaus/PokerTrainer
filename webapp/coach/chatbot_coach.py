@@ -16,15 +16,23 @@ import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 from dotenv import load_dotenv
-from openai import OpenAI
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except Exception as e:
+    OPENAI_AVAILABLE = False
+    OpenAI = None
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 import numpy as np
 
 # Load environment variables
-load_dotenv()
+try:
+    load_dotenv()
+except (PermissionError, FileNotFoundError):
+    # .env file not accessible, continue with system environment variables
+    pass
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
@@ -82,7 +90,11 @@ class ChatbotCoach:
                     self.api_key_available = False
 
         elif llm_provider == "openai":
-            if not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
+            if not OPENAI_AVAILABLE:
+                logger.error("❌ OpenAI library not available. Cannot use OpenAI provider.")
+                self.client = None
+                self.api_key_available = False
+            elif not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
                 logger.error("🔑 LLM_PROVIDER is set to 'openai' but OPENAI_API_KEY is not configured or using placeholder.")
                 self.client = None
                 self.api_key_available = False

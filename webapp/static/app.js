@@ -78,8 +78,8 @@ class PokerGame {
         // Action buttons
         document.querySelectorAll('.action-btn').forEach(btn => {
             btn.addEventListener('click', (e) => {
-                const actionIndex = parseInt(e.target.dataset.action);
-                this.handleAction(actionIndex);
+                const actionValue = parseInt(e.target.dataset.action);
+                this.handleAction(actionValue);
             });
         });
 
@@ -245,28 +245,7 @@ class PokerGame {
             return;
         }
 
-        // Find the index of this action - prefer raw_legal_actions, fallback to legal_actions
-        let actionIndex = -1;
-        
-        if (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.length > 0) {
-            actionIndex = this.gameState.raw_legal_actions.indexOf(actionValue);
-        }
-        
-        // Fallback to legal_actions if raw_legal_actions is empty or doesn't contain the action
-        if (actionIndex === -1 && this.gameState.legal_actions && this.gameState.legal_actions.length > 0) {
-            actionIndex = this.gameState.legal_actions.indexOf(actionValue);
-            console.log('Using legal_actions fallback. Action:', actionValue, 'Index:', actionIndex, 'legal_actions:', this.gameState.legal_actions);
-        }
-        
-        // Edge case: Action not found in either list (should not happen if isLegal check passed)
-        if (actionIndex === -1) {
-            console.error('Action is legal but not found in either list. Action:', actionValue, 
-                         'legal_actions:', this.gameState.legal_actions, 
-                         'raw_legal_actions:', this.gameState.raw_legal_actions);
-            this.updateStatus('Illegal action!');
-            this.showNotification('Invalid action selected', 'error');
-            return;
-        }
+        // Action value will be validated on the backend
 
         try {
             this.isProcessing = true;
@@ -287,7 +266,7 @@ class PokerGame {
                 },
                 body: JSON.stringify({
                     session_id: this.sessionId,
-                    action_index: actionIndex
+                    action_value: actionValue
                 })
             });
 
@@ -581,13 +560,13 @@ class PokerGame {
         const existingCount = container.children.length;
         const newCount = this.gameState.public_cards ? this.gameState.public_cards.length : 0;
         const currentStage = this.gameState.stage || 0;
-        
+
         // Check if stage changed (round ended) - this indicates flop/turn/river is being dealt
         // lastStage is updated in updateBetAmounts() which is called after this, so it still has previous value
         const stageChanged = (this.lastStage !== null && this.lastStage !== currentStage);
-        
-        // Only update if new cards are added
-        if (newCount > existingCount) {
+
+        // Only update if new cards are added AND the game is not over
+        if (newCount > existingCount && !this.gameState.is_over) {
             if (this.gameState.public_cards && this.gameState.public_cards.length > 0) {
                 // If stage changed (round ended), delay card reveal by 1.0s
                 // Otherwise show immediately (e.g., initial deal)
@@ -678,6 +657,11 @@ class PokerGame {
     }
 
     formatCard(cardString) {
+        // Ensure cardString is a string
+        if (typeof cardString !== 'string') {
+            return '??';
+        }
+
         if (!cardString || cardString === '??') {
             return '??';
         }
