@@ -40,7 +40,7 @@ from coach.llm_opponent_agent import LLMOpponentAgent
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+    format='%(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -539,20 +539,23 @@ class GameManager:
                             # Check if this action is for player 0 (human) and if we're in a stage transition
                             # If we just transitioned to postflop and this is player 0's action, it might be
                             # an automatic action that shouldn't be recorded
-                            if player_id == 0 and last_processed_stage == 0 and current_stage > 0:
-                                # We just transitioned from preflop to postflop
-                                # Check if this action is a CHECK_CALL that might be automatic
-                                action_value = action.value if hasattr(action, 'value') else action
-                                if action_value == 1:  # CHECK_CALL
-                                    # This might be an automatic action - check if it's actually valid
-                                    # by verifying the current player state
-                                    # In heads-up postflop, BB acts first. If we just transitioned to postflop
-                                    # and current_player is not 0, then player 0 shouldn't have acted yet
-                                    if current_player is not None and current_player != player_id:
-                                        # The current player doesn't match - this action might be stale/automatic
-                                        # This happens when RLCard records an internal state transition as an action
-                                        logger.warning(f"⚠️ [ACTION_HISTORY] Skipping potentially automatic action for P{player_id} during stage transition - Current player: {current_player}, Action: {action}, Stage: {current_stage}")
-                                        continue
+                            # NOTE: Disabled automatic action skip logic as it was incorrectly skipping legitimate preflop actions
+                            # when stage transitions occurred. This was causing preflop actions to not appear in action history
+                            # until after flop cards were dealt.
+                            # if player_id == 0 and last_processed_stage == 0 and current_stage > 0:
+                            #     # We just transitioned from preflop to postflop
+                            #     # Check if this action is a CHECK_CALL that might be automatic
+                            #     action_value = action.value if hasattr(action, 'value') else action
+                            #     if action_value == 1:  # CHECK_CALL
+                            #         # This might be an automatic action - check if it's actually valid
+                            #         # by verifying the current player state
+                            #         # In heads-up postflop, BB (dealer) acts first. If we just transitioned to postflop
+                            #         # and current_player is not 0, then player 0 shouldn't have acted yet
+                            #         if current_player is not None and current_player != player_id:
+                            #             # The current player doesn't match - this action might be stale/automatic
+                            #             # This happens when RLCard records an internal state transition as an action
+                            #             logger.warning(f"⚠️ [ACTION_HISTORY] Skipping potentially automatic action for P{player_id} during stage transition - Current player: {current_player}, Action: {action}, Stage: {current_stage}")
+                            #             continue
                             
                             # Reconstruct the state BEFORE this action was taken
                             # This ensures action labels are correct based on the context at that time
@@ -1429,6 +1432,8 @@ class GameManager:
                 raise ValueError(f'Action index {action_index} is no longer valid. Current legal actions: {current_legal_actions}')
 
             current_action_at_index = current_legal_actions[action_index]
+            # Extract value from action (handle both Action enum and int)
+            current_action_value = current_action_at_index.value if hasattr(current_action_at_index, 'value') else current_action_at_index
             if current_action_value != actual_action_value:
                 logger.warning(f"⚠️ [PROCESS_ACTION] Action at index {action_index} changed from {actual_action_value} to {current_action_value}. Using new value.")
                 actual_action_value = current_action_value
@@ -1482,7 +1487,7 @@ class GameManager:
                     logger.error(f"❌ [PROCESS_ACTION] Failed to get game state as fallback: {fallback_error}")
                     return None
 
-            # Fix for HUNL action order: BB acts first postflop, then SB
+            # Fix for HUNL action order: BB (dealer) acts first postflop, then SB
             # Get previous stage from current state
             raw_obs = state.get('raw_obs', {})
             prev_stage = raw_obs.get('stage', 0)
@@ -1499,46 +1504,57 @@ class GameManager:
             elif not isinstance(next_stage, int):
                 next_stage = int(next_stage) if next_stage else 0
             
-            # Get dealer_id to determine BB (dealer = BB in HUNL)
+            # Get dealer_id to determine positions (dealer = BB in HUNL, non-dealer = SB/button)
             dealer_id = None
             if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
                 dealer_id = env.game.dealer_id
             
-            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB should act first
+            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB (dealer) should act first
             if prev_stage == 0 and next_stage > 0:
                 if dealer_id is not None:
                     # BB (dealer) should act first postflop
-                    next_player_id = dealer_id
+                    bb_player = dealer_id
+                    next_player_id = bb_player
                     logger.info(f"🔄 [PROCESS_ACTION] Postflop transition detected - Overriding next_player to BB (dealer): {next_player_id}")
             
             # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
-            # In heads-up postflop: BB acts first, then SB
+            # In heads-up postflop: BB (dealer) acts first, then SB
             elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
                 if dealer_id is not None:
-                    # BB (dealer) acts first, SB (non-dealer) acts second
+                    # BB (dealer) acts first, SB (button/non-dealer) acts second
                     bb_player = dealer_id
                     sb_player = (dealer_id + 1) % 2
-                    
-                    # If BB just acted, next should be SB
+
+                    # If BB just acted, next should be SB (if there's a bet) or end betting round
                     if current_player == bb_player:
-                        next_player_id = sb_player
-                        logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - BB (P{bb_player}) acted, next is SB (P{sb_player})")
-                    # If SB just acted, next should be BB (if there's a bet) or end betting round
-                    elif current_player == sb_player:
+                        # Check if there's a bet (raised amounts differ)
+                        raised = next_raw_obs.get('raised', [0, 0])
+                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
+                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
+                        epsilon = 0.01
+
+                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
+                        if abs(bb_raised - sb_raised) > epsilon:
+                            next_player_id = sb_player
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
+                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
+                        # Don't override in this case - let RLCard determine if betting round ends
+                        else:
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
+                    else:
                         # Check if there's a bet (raised amounts differ)
                         raised = next_raw_obs.get('raised', [0, 0])
                         sb_raised = raised[sb_player] if len(raised) > sb_player else 0
                         bb_raised = raised[bb_player] if len(raised) > bb_player else 0
                         epsilon = 0.01
                         
-                        # If raised amounts differ, SB must have bet/raised, so BB needs to act
-                        if abs(sb_raised - bb_raised) > epsilon:
-                            next_player_id = bb_player
-                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - SB (P{sb_player}) bet/raised (SB: {sb_raised}, BB: {bb_raised}), next is BB (P{bb_player})")
+                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
+                        if abs(bb_raised - sb_raised) > epsilon:
+                            next_player_id = sb_player
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
                         # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-                        # Don't override in this case - let RLCard determine if betting round ends
                         else:
-                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - Both players checked (SB: {sb_raised}, BB: {bb_raised}), letting RLCard handle next state")
+                            logger.info(f"🔄 [PROCESS_ACTION] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
 
             # Update game state
             logger.info(f"🔄 [PROCESS_ACTION] Updating game state - Next Player: {next_player_id}")
@@ -1673,7 +1689,7 @@ class GameManager:
                 logger.error(f"Environment returned None state for AI turn in session {session_id}")
                 return None
             
-            # Fix for HUNL action order: BB acts first postflop, then SB
+            # Fix for HUNL action order: BB (dealer) acts first postflop, then SB
             # Get previous stage from current state
             raw_obs = state.get('raw_obs', {})
             prev_stage = raw_obs.get('stage', 0)
@@ -1690,46 +1706,57 @@ class GameManager:
             elif not isinstance(next_stage, int):
                 next_stage = int(next_stage) if next_stage else 0
             
-            # Get dealer_id to determine BB (dealer = BB in HUNL)
+            # Get dealer_id to determine positions (dealer = BB in HUNL, non-dealer = SB/button)
             dealer_id = None
             if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
                 dealer_id = env.game.dealer_id
             
-            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB should act first
+            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB (dealer) should act first
             if prev_stage == 0 and next_stage > 0:
                 if dealer_id is not None:
                     # BB (dealer) should act first postflop
-                    next_player_id = dealer_id
+                    bb_player = dealer_id
+                    next_player_id = bb_player
                     logger.info(f"🔄 [AI_TURN] Postflop transition detected - Overriding next_player to BB (dealer): {next_player_id}")
             
             # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
-            # In heads-up postflop: BB acts first, then SB
+            # In heads-up postflop: BB (dealer) acts first, then SB
             elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
                 if dealer_id is not None:
-                    # BB (dealer) acts first, SB (non-dealer) acts second
+                    # BB (dealer) acts first, SB (button/non-dealer) acts second
                     bb_player = dealer_id
                     sb_player = (dealer_id + 1) % 2
-                    
-                    # If BB just acted, next should be SB
+
+                    # If BB just acted, next should be SB (if there's a bet) or end betting round
                     if current_player == bb_player:
-                        next_player_id = sb_player
-                        logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) acted, next is SB (P{sb_player})")
-                    # If SB just acted, next should be BB (if there's a bet) or end betting round
-                    elif current_player == sb_player:
+                        # Check if there's a bet (raised amounts differ)
+                        raised = next_raw_obs.get('raised', [0, 0])
+                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
+                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
+                        epsilon = 0.01
+
+                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
+                        if abs(bb_raised - sb_raised) > epsilon:
+                            next_player_id = sb_player
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
+                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
+                        # Don't override in this case - let RLCard determine if betting round ends
+                        else:
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
+                    else:
                         # Check if there's a bet (raised amounts differ)
                         raised = next_raw_obs.get('raised', [0, 0])
                         sb_raised = raised[sb_player] if len(raised) > sb_player else 0
                         bb_raised = raised[bb_player] if len(raised) > bb_player else 0
                         epsilon = 0.01
                         
-                        # If raised amounts differ, SB must have bet/raised, so BB needs to act
-                        if abs(sb_raised - bb_raised) > epsilon:
-                            next_player_id = bb_player
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - SB (P{sb_player}) bet/raised (SB: {sb_raised}, BB: {bb_raised}), next is BB (P{bb_player})")
+                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
+                        if abs(bb_raised - sb_raised) > epsilon:
+                            next_player_id = sb_player
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
                         # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-                        # Don't override in this case - let RLCard determine if betting round ends
                         else:
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (SB: {sb_raised}, BB: {bb_raised}), letting RLCard handle next state")
+                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
             
             # Update game state
             game['current_state'] = next_state
