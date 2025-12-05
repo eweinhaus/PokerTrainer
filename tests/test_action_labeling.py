@@ -54,7 +54,6 @@ def test_action_labeling():
     expected_check = 'Check'
     actual_check = labels_not_facing.get(Action.CHECK_CALL)
 
-    print(f"Not facing bet - Expected: '{expected_check}', Got: '{actual_check}'")
     assert actual_check == expected_check, f"Expected '{expected_check}', got '{actual_check}'"
 
     # Test facing bet
@@ -62,10 +61,8 @@ def test_action_labeling():
     expected_call = 'Call'
     actual_call = labels_facing.get(Action.CHECK_CALL)
 
-    print(f"Facing bet - Expected: '{expected_call}', Got: '{actual_call}'")
     assert actual_call == expected_call, f"Expected '{expected_call}', got '{actual_call}'"
 
-    print("✓ Action labeling test passed!")
 
 def test_tool_schema():
     """Test that tool schema includes correct actions based on facing_bet"""
@@ -97,14 +94,11 @@ def test_tool_schema():
     assert 'check' not in schema_facing['enum'], "Should not include 'check' when facing bet"
     assert 'call' in schema_facing['description'], "Description should mention 'call'"
 
-    print("✓ Tool schema test passed!")
 
 if __name__ == '__main__':
     try:
         test_action_labeling()
         test_tool_schema()
-        print("\n🎉 All tests passed! The fix should work correctly.")
     except Exception as e:
-        print(f"\n❌ Test failed: {e}")
         sys.exit(1)
 

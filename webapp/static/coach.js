@@ -707,6 +707,20 @@ class ChatManager {
         for (let i = 0; i < lines.length; i++) {
             let line = lines[i].trim();
             
+            // Check for markdown headers (#, ##, ###, etc.)
+            const headerMatch = line.match(/^(#{1,6})\s+(.+)$/);
+            if (headerMatch) {
+                // Flush any active list before header
+                if (inList) {
+                    flushList();
+                }
+                const level = headerMatch[1].length; // Number of # characters
+                const headerText = headerMatch[2];
+                const processed = this.processInlineMarkdown(headerText);
+                result.push(`<h${level}>${processed}</h${level}>`);
+                continue;
+            }
+            
             // Check for numbered list (1., 2., etc.)
             const numberedMatch = line.match(/^(\d+)\.\s+(.+)$/);
             if (numberedMatch) {

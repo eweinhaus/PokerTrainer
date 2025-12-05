@@ -61,7 +61,7 @@ PokerTrainer/
 │   ├── templates/         # HTML templates
 │   └── tests/             # Comprehensive test suite
 ├── rlcard/                # RLCard framework (submodule)
-├── test_*.py             # Development test scripts
+├── tests/                # Development test scripts
 └── README.md
 ```
 

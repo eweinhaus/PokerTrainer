@@ -27,10 +27,8 @@ try:
 
     # This should not cause logger error
     action = agent.step(test_state)
-    print(f"✓ GTOAgent.step() completed successfully, returned action: {action}")
 
 except Exception as e:
-    print(f"✗ Error: {e}")
     import traceback
     traceback.print_exc()
 

@@ -756,7 +756,7 @@ class PokerGame {
             // Subtract unmatched bets from pot to show only committed money
             // When round ends (stage changes), all bets are matched and go into pot
             const displayedPot = Math.max(0, this.gameState.pot - unmatchedBet);
-            const potBB = (displayedPot / bigBlind).toFixed(1);
+            const potBB = displayedPot.toFixed(1);
             
             const potEl = document.getElementById('potDisplay');
             if (potEl) {
@@ -1680,7 +1680,7 @@ class PokerGame {
         this.disableAllButtons();
 
         const bigBlind = this.gameState.big_blind || 2;
-        const potBB = (this.gameState.pot / bigBlind).toFixed(1);
+        const potBB = this.gameState.pot.toFixed(1);
         const playerBB = (this.gameState.stakes[0] / bigBlind).toFixed(1);
         const opponentBB = (this.gameState.stakes[1] / bigBlind).toFixed(1);
 

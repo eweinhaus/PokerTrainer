@@ -30,19 +30,15 @@ def test_facing_4bet_options():
 
     # Test the context detection
     context = ActionLabeling.get_context_from_state(game_state, player_id=0)
-    print(f"Context for player facing 4-bet: {context}")
 
     # Test the button labels
     labels = ActionLabeling.get_button_labels(context)
-    print(f"Button labels: {labels}")
 
     # Should hide raise buttons when facing 4-bet (betting_level = 2)
     expected_show_raise = False
     if labels['showRaiseHalfPot'] == expected_show_raise and labels['showRaisePot'] == expected_show_raise:
-        print(f"✅ SUCCESS: Raise buttons are hidden (showRaiseHalfPot={labels['showRaiseHalfPot']}, showRaisePot={labels['showRaisePot']})")
         return True
     else:
-        print(f"❌ FAILED: Expected raise buttons to be hidden, got showRaiseHalfPot={labels['showRaiseHalfPot']}, showRaisePot={labels['showRaisePot']}")
         return False
 
 def test_facing_3bet_options():
@@ -66,11 +62,9 @@ def test_facing_3bet_options():
 
     # Test the context detection
     context = ActionLabeling.get_context_from_state(game_state, player_id=0)
-    print(f"Context for player facing 3-bet: {context}")
 
     # Test the button labels
     labels = ActionLabeling.get_button_labels(context)
-    print(f"Button labels: {labels}")
 
     # Should show raise buttons when facing 3-bet (betting_level = 1)
     expected_show_raise = True
@@ -78,10 +72,8 @@ def test_facing_3bet_options():
     if (labels['showRaiseHalfPot'] == expected_show_raise and
         labels['showRaisePot'] == False and  # Only show one raise button
         labels['raiseHalfPot'] == expected_label):
-        print(f"✅ SUCCESS: Facing 3-bet shows 4-bet option '{expected_label}'")
         return True
     else:
-        print(f"❌ FAILED: Expected facing 3-bet to show 4-bet option, got {labels}")
         return False
 
 if __name__ == "__main__":
@@ -107,16 +99,11 @@ if __name__ == "__main__":
         success2 = test_facing_3bet_options()
 
         if success1 and success2:
-            print("\n🎉 All facing 4-bet option tests passed!")
-            print("✅ Facing 4-bet: Only fold, call, all-in options")
-            print("✅ Facing 3-bet: Shows 4-bet option")
             sys.exit(0)
         else:
-            print("\n❌ Some tests failed")
             sys.exit(1)
 
     except Exception as e:
-        print(f"Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

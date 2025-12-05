@@ -30,19 +30,15 @@ def test_4bet_25bb_labeling():
 
     # Test the context detection
     context = ActionLabeling.get_context_from_state(game_state, player_id=0)
-    print(f"Context for player facing 3-bet: {context}")
 
     # Test the button labels
     labels = ActionLabeling.get_button_labels(context)
-    print(f"Button labels: {labels}")
 
     # Should show "4-bet to 25 BB" for both RAISE_HALF_POT and RAISE_POT
     expected = '4-bet to 25 BB'
     if labels['raiseHalfPot'] == expected and labels['raisePot'] == expected:
-        print(f"✅ SUCCESS: Button labels show '{expected}'")
         return True
     else:
-        print(f"❌ FAILED: Expected '{expected}', got raiseHalfPot='{labels['raiseHalfPot']}', raisePot='{labels['raisePot']}'")
         return False
 
 def test_4bet_action_labeling():
@@ -67,14 +63,11 @@ def test_4bet_action_labeling():
 
     # Test RAISE_POT action (which should be the 4-bet)
     action_label = ActionLabeling.get_action_label(3, context, bet_amount=50)  # 25BB total = 50 chips
-    print(f"Action label for RAISE_POT (4-bet): {action_label}")
 
     expected = "4-bet to 25BB"
     if action_label == expected:
-        print(f"✅ SUCCESS: Action labeled as '{expected}'")
         return True
     else:
-        print(f"❌ FAILED: Expected '{expected}', got '{action_label}'")
         return False
 
 if __name__ == "__main__":
@@ -100,14 +93,11 @@ if __name__ == "__main__":
         success2 = test_4bet_action_labeling()
 
         if success1 and success2:
-            print("\n🎉 All 4-bet 25BB tests passed!")
             sys.exit(0)
         else:
-            print("\n❌ Some tests failed")
             sys.exit(1)
 
     except Exception as e:
-        print(f"Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

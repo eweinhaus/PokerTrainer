@@ -11,6 +11,7 @@ Supports both OpenAI and OpenRouter APIs:
 
 import os
 import time
+import json
 import logging
 import traceback
 from datetime import datetime
@@ -64,6 +65,9 @@ class ChatbotCoach:
 
         # Configure timeout for API calls (20 seconds for coach to handle complex analysis)
         self.api_timeout = 20.0
+
+        # Initialize card mapping for converting string cards to indices
+        self._init_card_mapping()
 
         # Validate provider choice and initialize appropriate client
         if llm_provider == "openrouter":
@@ -142,7 +146,30 @@ class ChatbotCoach:
         
         # Thread pool executor for non-blocking API calls
         self.executor = ThreadPoolExecutor(max_workers=5)
-    
+
+    def _init_card_mapping(self):
+        """
+        Initialize card2index mapping for converting card strings to indices.
+        This allows the coach to handle both string cards ('SK', 'C5') and integer indices.
+        """
+        # Try to load from RLCard first, fallback to manual mapping
+        try:
+            import rlcard
+            with open(os.path.join(rlcard.__path__[0], 'games/limitholdem/card2index.json'), 'r') as file:
+                self.card2index = json.load(file)
+        except Exception as e:
+            logger.debug(f"Could not load RLCard card2index mapping: {e}. Using fallback mapping.")
+            # Fallback card2index mapping for basic poker cards
+            # Format: [rank][suit] where rank: 2-9,T,J,Q,K,A and suit: S,H,D,C
+            self.card2index = {}
+            suits = ['S', 'H', 'D', 'C']
+            ranks = ['2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A']
+            card_index = 0
+            for rank in ranks:
+                for suit in suits:
+                    self.card2index[f"{rank}{suit}"] = card_index
+                    card_index += 1
+
     def _build_system_prompt(self) -> str:
         """
         Build system prompt for poker coach persona.
@@ -150,55 +177,39 @@ class ChatbotCoach:
         Returns:
             str: System prompt text
         """
-        return """You are a talented poker player and smart poker coach specializing in Heads Up No Limit Texas Hold'em. 
-Your expertise includes:
-- Game Theory Optimal (GTO) strategy
-- Pot odds and equity calculations
-- Position and stack depth considerations
-- Bet sizing principles
-- Range analysis and opponent modeling
+        return """You are an expert poker coach specializing in Heads Up No Limit Texas Hold'em. Your responses must follow this exact structure and be no more than 500 words total:
 
-Your role is to:
-- Walk players through their decision-making process step-by-step
-- Help players think like a professional poker player
-- Provide detailed, educational analysis of hands and decisions
-- Explain concepts clearly with specific calculations when relevant
-- Reference current game context when relevant
-- Analyze previous hands and decisions when the player asks about them
-- Be encouraging and constructive (supportive coach, not judgmental)
+**1. SITUATION SUMMARY** (First paragraph)
+- State the user's hole cards
+- Describe the board (if any cards are visible)
+- Identify the user's position (button/SB or big blind)
+- Summarize previous action (who acted, what they did, bet sizes)
+- Note relevant context: pot size, stack depths, SPR (stack-to-pot ratio)
 
-You have access to:
-- Current game state (when provided)
-- Recent hand history with all decisions, cards, board states, pot sizes, and stack depths (when provided)
+**2. THOUGHT PROCESS** (Middle section)
+Walk through the decision-making process step-by-step:
+- Analyze opponent's likely range based on their actions
+- Calculate pot odds and required equity (if facing a bet)
+- Evaluate your hand's equity vs opponent's range
+- Consider position, stack depth, and board texture
+- Apply GTO principles: what would optimal play look like here?
+- Weigh the factors: what makes this decision easy or difficult?
 
-When a player asks about a previous decision or hand (e.g., "Was that a good call?"):
-- Walk through the decision-making process step-by-step, like a professional would think through it
-- Use the hand history context to identify which hand/decision they're referring to
-- Analyze the specific situation systematically:
-  1. Identify the situation (position, stacks, pot size, action history)
-  2. Analyze opponent ranges (what hands would they play this way?)
-  3. Calculate pot odds and required equity
-  4. Evaluate your hand's equity vs opponent's likely range
-  5. Consider position, stack depth, and SPR (stack-to-pot ratio)
-  6. Provide a clear verdict with reasoning
+**3. RECOMMENDED ACTION** (Final paragraph)
+- Clearly state the recommended action (Fold, Call, or Raise to X BB)
+- Briefly explain why this is the best decision
+- Note any important considerations or alternatives
 
-Response format for hand analysis questions:
-- Use step-by-step structure (Step 1, Step 2, etc.) when analyzing specific hands
-- Include specific calculations (pot odds, equity, break-even percentages)
-- Provide range analysis (what hands opponent likely has)
-- Give a clear verdict (good/bad decision) with reasoning
-- Be thorough but educational - help them understand the thinking process
-
-Response style:
-- For hand analysis: Detailed and step-by-step (can be longer, 300-500 words)
-- For general questions: Clear and concise (150 words or less)
-- Educational and informative
-- Use consistent terminology (e.g., "continuation bet" not "c-bet", "pot odds" not "odds")
-- Avoid unnecessary poker jargon, but explain jargon when used
-- Use examples when helpful
+**Guidelines:**
+- Maximum 500 words total
+- Be concise but educational
+- Use specific calculations when relevant (pot odds, equity percentages)
+- Use consistent terminology ("continuation bet" not "c-bet", "pot odds" not "odds")
 - Friendly but professional tone
-- Focus on learning and improvement
-- You may use markdown formatting (bold, italic, lists, numbered steps) to improve readability"""
+- Focus on teaching the thinking process
+- Use markdown formatting (bold, italic) for clarity
+
+You have access to current game state and hand history when provided. Use this context to give accurate, situation-specific advice."""
     
     def chat(self, message: str, game_context: Optional[Dict[str, Any]] = None, 
              hand_history: Optional[List[Dict[str, Any]]] = None,
@@ -235,18 +246,35 @@ Response style:
         try:
             # Get conversation history
             history = self._get_conversation_history(session_id)
-            
+
+            # [AI_COACH_LOGGING] Log hand history retrieval from storage
+            logger.info(f"🤖 [AI_COACH_HAND_ACCESS] Session {session_id}: Retrieving hand history from storage")
+            logger.info(f"🤖 [AI_COACH_HAND_ACCESS] Session {session_id}: Retrieved {len(hand_history) if hand_history else 0} total decisions from hand_history_storage")
+
+            if hand_history:
+                # Log sample of hand history structure for debugging
+                sample_decisions = hand_history[-3:] if len(hand_history) > 3 else hand_history
+                logger.info(f"🤖 [AI_COACH_HAND_ACCESS] Session {session_id}: Sample of last {len(sample_decisions)} decisions:")
+                for i, decision in enumerate(sample_decisions):
+                    player_id = decision.get('player_id', '?')
+                    action = decision.get('action', '?')
+                    stage = decision.get('stage', '?')
+                    hand = decision.get('hand', [])
+                    logger.info(f"🤖 [AI_COACH_HAND_ACCESS]   Decision {len(hand_history) - len(sample_decisions) + i}: P{player_id}, Stage{stage}, Action{action}, Hand{hand}")
+
             # Build messages array
             messages = [
                 {"role": "system", "content": self.system_prompt}
             ]
-            
+
             # Add conversation history
             messages.extend(history)
             
             # Inject game context and hand history if available and relevant
+            logger.info(f"🤖 [AI_COACH_HAND_ACCESS] Session {session_id}: Injecting context for message: '{message[:50]}...'")
             context_text = self._inject_context(game_context, hand_history, message)
             if context_text:
+                logger.info(f"🤖 [AI_COACH_HAND_ACCESS] Session {session_id}: Context injection successful - {len(context_text)} characters added to prompt")
                 messages.append({
                     "role": "system",
                     "content": f"Current game context:\n{context_text}"
@@ -361,8 +389,8 @@ Response style:
         max_retries = 2
         retry_delays = [1.0, 2.0]  # Exponential backoff: 1s, 2s
         
-        # Adjust max_tokens based on question type (conservative limits to prevent timeouts)
-        max_tokens = 400 if is_hand_analysis else 150  # ~300 words for hand analysis, ~110 words for general
+        # Adjust max_tokens to ensure responses stay under 500 words (1 token ≈ 0.75 words, so 375 tokens ≈ 500 words)
+        max_tokens = 375  # Maximum 500 words for all responses
         
         for attempt in range(max_retries + 1):
             try:
@@ -454,15 +482,24 @@ Response style:
         Returns:
             str: Formatted context text, or None if not relevant
         """
-        logger.debug(f"🔧 _inject_context called: hand_history={hand_history is not None and len(hand_history) if hand_history else 0} decisions, game_context={game_context is not None}")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Starting context injection analysis")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Message: '{message[:100]}...'")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Game context available: {game_context is not None}")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Hand history available: {hand_history is not None} ({len(hand_history) if hand_history else 0} decisions)")
+
         message_lower = message.lower()
         
         # Determine if current game context is relevant based on message
-        context_relevant = any(keyword in message_lower for keyword in [
-            "current", "now", "this hand", "this situation", "what should", 
+        context_relevant_keywords = [
+            "current", "now", "this hand", "this situation", "what should",
             "optimal play", "should i"
-        ])
-        
+        ]
+        context_relevant = any(keyword in message_lower for keyword in context_relevant_keywords)
+
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Context relevance analysis:")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION]   Keywords checked: {context_relevant_keywords}")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION]   Current game context relevant: {context_relevant}")
+
         context_parts = []
         
         # Add current game context if available and relevant
@@ -513,6 +550,7 @@ Response style:
         
         # Always include most recent hand history if available
         if hand_history and len(hand_history) > 0:
+            logger.info(f"🤖 [AI_COACH_HAND_PROCESSING] Processing hand history with {len(hand_history)} total decisions")
             hand_history_added = False
 
             # First, try to get player decisions to verify we have data
@@ -522,6 +560,8 @@ Response style:
                 player_id = d.get('player_id')
                 if player_id == 0 or player_id == "0" or str(player_id) == "0":
                     player_decisions_count += 1
+
+            logger.info(f"🤖 [AI_COACH_HAND_PROCESSING] Found {player_decisions_count} player decisions (player_id == 0) out of {len(hand_history)} total decisions")
             
             if player_decisions_count == 0:
                 logger.warning("Hand history exists but contains no player decisions (player_id == 0)")
@@ -531,39 +571,52 @@ Response style:
                 hand_history_added = True
             else:
                 try:
+                    logger.info(f"🤖 [AI_COACH_HAND_EXTRACTION] Identifying most recent hand from {len(hand_history)} total decisions")
+
                     # Get the most recent hand by finding the last preflop decision and all decisions after it
                     # This is more reliable than grouping by stage resets
                     most_recent_hand_decisions = []
-                    
+
                     # Work backwards from the end to find the start of the most recent hand
                     # The most recent hand starts at the last preflop (stage 0) decision
+                    logger.info(f"🤖 [AI_COACH_HAND_EXTRACTION] Searching backwards for last preflop decision (stage 0)")
                     last_preflop_index = None
                     for i in range(len(hand_history) - 1, -1, -1):
-                        if hand_history[i].get('stage', 0) == 0:
+                        stage = hand_history[i].get('stage', 0)
+                        # Handle both int and string stage values
+                        if stage == 0 or stage == "0" or str(stage) == "0":
                             last_preflop_index = i
+                            logger.info(f"🤖 [AI_COACH_HAND_EXTRACTION] Found last preflop decision at index {i}")
                             break
                     
                     # If we found a preflop decision, get all decisions from that point forward
                     # Limit to last 5 decisions to avoid overly long prompts (reduced for faster responses)
                     if last_preflop_index is not None:
                         most_recent_hand_decisions = hand_history[last_preflop_index:]
+                        logger.info(f"🤖 [AI_COACH_HAND_EXTRACTION] Extracted {len(most_recent_hand_decisions)} decisions from last preflop decision onwards")
                         # Limit to last 5 decisions to keep prompt size manageable and improve response time
                         if len(most_recent_hand_decisions) > 5:
+                            logger.info(f"🤖 [AI_COACH_HAND_EXTRACTION] Limiting to last 5 decisions for prompt size control")
                             most_recent_hand_decisions = most_recent_hand_decisions[-5:]
                     else:
                         # If no preflop found, just get the last 10 decisions (likely from current hand)
                         most_recent_hand_decisions = hand_history[-10:] if len(hand_history) > 10 else hand_history
+                        logger.warning(f"🤖 [AI_COACH_HAND_EXTRACTION] No preflop decision found, using last {len(most_recent_hand_decisions)} decisions as fallback")
                     
                     # Filter to player decisions only (player_id == 0)
                     # Also try player_id as string "0" or integer 0
+                    logger.info(f"🤖 [AI_COACH_DECISION_FILTERING] Filtering {len(most_recent_hand_decisions)} decisions to player decisions only")
                     player_decisions = []
                     for d in most_recent_hand_decisions:
                         player_id = d.get('player_id')
                         # Handle both int and string player_id
                         if player_id == 0 or player_id == "0" or str(player_id) == "0":
                             player_decisions.append(d)
-                    
-                    logger.debug(f"Found {len(player_decisions)} player decisions in most recent hand (from {len(most_recent_hand_decisions)} total decisions)")
+                            logger.debug(f"🤖 [AI_COACH_DECISION_FILTERING] Included decision: P{player_id}, Stage{d.get('stage', '?')}, Action{d.get('action', '?')}")
+                        else:
+                            logger.debug(f"🤖 [AI_COACH_DECISION_FILTERING] Excluded decision: P{player_id}, Stage{d.get('stage', '?')}, Action{d.get('action', '?')}")
+
+                    logger.info(f"🤖 [AI_COACH_DECISION_FILTERING] Filtered to {len(player_decisions)} player decisions from {len(most_recent_hand_decisions)} total decisions")
                     
                     if player_decisions:
                         context_parts.append("\nMost Recent Hand:")
@@ -576,6 +629,8 @@ Response style:
                                 stage = decision.get('stage', 0)
                                 hand_cards = decision.get('hand', [])
                                 board_cards = decision.get('public_cards', [])
+
+                                logger.debug(f"🤖 [AI_COACH_HAND_CARD_EXTRACTION] Processing decision {j}: Action={action}, Stage={stage}, Hand={hand_cards}, Board={board_cards}")
 
                                 # Convert numpy types and map to readable format
                                 action = self._convert_numpy_type(action)
@@ -590,11 +645,17 @@ Response style:
                                 # Format cards
                                 hand_str = self._format_cards(hand_cards) if hand_cards else ""
                                 board_str = self._format_cards(board_cards) if board_cards else ""
+                                
+                                # Get position if available
+                                position = decision.get('position')
+                                position_str = f", Position: {position}" if position else ""
+
+                                logger.debug(f"🤖 [AI_COACH_HAND_CARD_EXTRACTION] Formatted decision {j}: {stage_name} {action_name}, Hand='{hand_str}', Board='{board_str}', Position='{position}'")
 
                                 # Build decision text
                                 if j == 1 and hand_str:
-                                    # First decision: include hole cards
-                                    decision_text = f"  {j}. {stage_name}: {action_name} (Hand: {hand_str})"
+                                    # First decision: include hole cards and position
+                                    decision_text = f"  {j}. {stage_name}: {action_name} (Hand: {hand_str}{position_str})"
                                 elif j == len(player_decisions) and board_str:
                                     # Last decision: include final board
                                     decision_text = f"  {j}. {stage_name}: {action_name} (Board: {board_str})"
@@ -642,11 +703,13 @@ Response style:
                                     
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
+                                    position = decision.get('position')
                                     hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                                     board_str = self._format_cards(board_cards) if board_cards else "No board"
+                                    position_str = f", Position: {position}" if position else ""
                                     context_parts.append(
                                         f"  {i}. {stage_map.get(stage_int, 'Unknown')}: {action_map.get(action_int, 'Unknown')} "
-                                        f"(Hand: {hand_str}, Board: {board_str})"
+                                        f"(Hand: {hand_str}, Board: {board_str}{position_str})"
                                     )
                                 except Exception as e:
                                     logger.warning(f"Error formatting fallback decision {i}: {e}")
@@ -691,11 +754,13 @@ Response style:
                                     
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
+                                    position = decision.get('position')
                                     hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                                     board_str = self._format_cards(board_cards) if board_cards else "No board"
+                                    position_str = f", Position: {position}" if position else ""
                                     context_parts.append(
                                         f"  {i}. {stage_map.get(stage_int, 'Unknown')}: {action_map.get(action_int, 'Unknown')} "
-                                        f"(Hand: {hand_str}, Board: {board_str})"
+                                        f"(Hand: {hand_str}, Board: {board_str}{position_str})"
                                     )
                                 except Exception as e:
                                     logger.warning(f"Error formatting simplified decision {i}: {e}")
@@ -735,15 +800,17 @@ Response style:
         result = "\n".join(context_parts)
 
         # Log the context being sent for debugging
-        logger.debug(f"Coach context built: {len(result)} chars")
-        logger.debug(f"Context content:\n{result}")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Final context built: {len(result)} characters")
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Context content preview:\n{result[:500]}{'...' if len(result) > 500 else ''}")
 
         # Limit total context size to prevent overly long prompts (max 2000 chars)
         # This helps prevent timeout issues with very large prompts
         max_context_length = 2000
         if len(result) > max_context_length:
-            logger.warning(f"Context too long ({len(result)} chars), truncating to {max_context_length} chars")
+            logger.warning(f"🤖 [AI_COACH_CONTEXT_INJECTION] Context too long ({len(result)} chars), truncating to {max_context_length} chars")
             result = result[:max_context_length] + "\n... (context truncated for performance)"
+
+        logger.info(f"🤖 [AI_COACH_CONTEXT_INJECTION] Context injection complete - {len(result)} characters will be sent to AI coach")
         return result
     
     def _format_hand_history_simple(self, hand_history: List[Dict[str, Any]]) -> Optional[str]:
@@ -775,6 +842,7 @@ Response style:
                 hand_cards = decision.get('hand', [])
                 board_cards = decision.get('public_cards', [])
                 pot = decision.get('pot', 0)
+                position = decision.get('position')
                 
                 action_map = {0: "Fold", 1: "Check/Call", 2: "Raise ½ Pot", 3: "Raise Pot", 4: "All-In"}
                 stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
@@ -783,10 +851,11 @@ Response style:
                 stage_name = stage_map.get(stage, f"Stage {stage}")
                 hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                 board_str = self._format_cards(board_cards) if board_cards else "No board"
+                position_str = f", Position: {position}" if position else ""
                 
                 parts.append(
                     f"  {i}. {stage_name}: {action_name} "
-                    f"(Your hand: {hand_str}, Board: {board_str}, Pot: {pot})"
+                    f"(Your hand: {hand_str}, Board: {board_str}, Pot: {pot}{position_str})"
                 )
             
             return "\n".join(parts)
@@ -823,35 +892,57 @@ Response style:
             except (ValueError, TypeError):
                 return value
     
-    def _format_cards(self, cards: List[int]) -> str:
+    def _format_cards(self, cards: List) -> str:
         """
-        Format card indices to readable string.
-        
+        Format card indices or strings to readable string.
+
         Args:
-            cards: List of card indices from RLCard
-        
+            cards: List of card indices from RLCard (0-51) or card strings ('SK', 'C5')
+
         Returns:
-            str: Formatted card string (e.g., "As Kh")
+            str: Formatted card string (e.g., "A♠ K♥")
         """
         if not cards:
             return ""
-        
+
         rank_names = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
         suit_names = ['s', 'h', 'd', 'c']  # spades, hearts, diamonds, clubs
         suit_symbols = ['♠', '♥', '♦', '♣']
-        
+
         formatted_cards = []
         for card in cards:
-            # Convert to int if it's a string or numpy type
-            if not isinstance(card, int):
+            if isinstance(card, str):
+                # Handle string cards like 'SK', 'C5' (Suit first, then Rank)
+                if len(card) == 2:
+                    suit_char, rank_char = card[0], card[1]
+                    # Map rank character to index
+                    rank_map = {'2': 1, '3': 2, '4': 3, '5': 4, '6': 5, '7': 6, '8': 7, '9': 8, 'T': 9, 'J': 10, 'Q': 11, 'K': 12, 'A': 0}
+                    suit_map = {'S': 0, 'H': 1, 'D': 2, 'C': 3}
+
+                    rank = rank_map.get(rank_char.upper(), 0)
+                    suit = suit_map.get(suit_char.upper(), 0)
+                    formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
+                else:
+                    # Try to convert using card2index mapping
+                    if hasattr(self, 'card2index') and card in self.card2index:
+                        card_index = self.card2index[card]
+                        rank = card_index % 13
+                        suit = card_index // 13
+                        formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
+                    else:
+                        # Fallback: use card string as-is
+                        formatted_cards.append(card)
+            else:
+                # Handle integer card indices (original logic)
                 try:
-                    card = int(card)
+                    card_int = int(card)
+                    rank = card_int % 13
+                    suit = card_int // 13
+                    formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
                 except (ValueError, TypeError):
-                    card = 0  # Safe fallback
-            rank = card % 13
-            suit = card // 13
-            formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
-        
+                    # Safe fallback
+                    formatted_cards.append(str(card))
+
         return " ".join(formatted_cards)
     
     def _get_conversation_history(self, session_id: str) -> List[Dict[str, str]]:
@@ -905,9 +996,9 @@ Response style:
         """
         # Don't truncate error messages - they contain important troubleshooting information
         if not is_error:
-            # Limit word count based on question type
+            # Limit word count to 500 words maximum for all responses
             words = response_text.strip().split()
-            max_words = 500 if is_hand_analysis else 150
+            max_words = 500
             if len(words) > max_words:
                 response_text = ' '.join(words[:max_words])
         

@@ -16,7 +16,6 @@ from webapp.coach.llm_opponent_agent import LLMOpponentAgent
 
 def test_ai_turn_logging():
     """Test AI turn processing with logging"""
-    print("Testing AI turn processing with enhanced logging...")
 
     # Create game manager
     game_manager = GameManager()
@@ -25,32 +24,23 @@ def test_ai_turn_logging():
     session_id = 'test_session_123'
     game_state = game_manager.start_game(session_id)
 
-    print(f"Started new game with session: {session_id}")
-    print(f"Initial game state: current_player = {game_state.get('current_player')}")
 
     # Process human action to trigger AI turn
     # Let's assume it's the human's turn first
     if game_state.get('current_player') == 0:
-        print("Human player's turn - making a fold action to trigger AI turn...")
         try:
             # Try to fold (action 0)
             result = game_manager.process_action(session_id, 0)
-            print(f"Human action processed successfully")
-            print(f"New game state: current_player = {result.get('current_player')}")
         except Exception as e:
-            print(f"Error processing human action: {e}")
             import traceback
             traceback.print_exc()
             return
 
     # Now it should be AI's turn
     if game_state.get('current_player') == 1 or (result and result.get('current_player') == 1):
-        print("AI player's turn - triggering AI turn processing...")
         try:
             ai_result = game_manager.process_ai_turn(session_id)
-            print("AI turn processed successfully")
         except Exception as e:
-            print(f"Error processing AI turn: {e}")
             import traceback
             traceback.print_exc()
 

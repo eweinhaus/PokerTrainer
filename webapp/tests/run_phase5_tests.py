@@ -15,10 +15,6 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../'
 
 def run_tests_with_coverage():
     """Run tests with coverage reporting"""
-    print("=" * 80)
-    print("Phase 5 Test Suite")
-    print("=" * 80)
-    print()
     
     # Test modules to run
     test_modules = [
@@ -37,51 +33,26 @@ def run_tests_with_coverage():
         try:
             module = __import__(module_name, fromlist=[''])
             suite.addTests(loader.loadTestsFromModule(module))
-            print(f"✓ Loaded {module_name}")
         except ImportError as e:
-            print(f"✗ Failed to load {module_name}: {e}")
     
-    print()
-    print("=" * 80)
-    print("Running Tests")
-    print("=" * 80)
-    print()
     
     # Run tests
     runner = unittest.TextTestRunner(verbosity=2)
     result = runner.run(suite)
     
     # Print summary
-    print()
-    print("=" * 80)
-    print("Test Summary")
-    print("=" * 80)
-    print(f"Tests run: {result.testsRun}")
-    print(f"Successes: {result.testsRun - len(result.failures) - len(result.errors)}")
-    print(f"Failures: {len(result.failures)}")
-    print(f"Errors: {len(result.errors)}")
-    print(f"Success rate: {((result.testsRun - len(result.failures) - len(result.errors)) / result.testsRun * 100):.1f}%")
     
     if result.failures:
-        print("\nFailures:")
         for test, traceback in result.failures:
-            print(f"  - {test}")
     
     if result.errors:
-        print("\nErrors:")
         for test, traceback in result.errors:
-            print(f"  - {test}")
     
     return result.wasSuccessful()
 
 
 def run_coverage_report():
     """Generate coverage report"""
-    print()
-    print("=" * 80)
-    print("Generating Coverage Report")
-    print("=" * 80)
-    print()
     
     try:
         # Run coverage
@@ -98,7 +69,6 @@ def run_coverage_report():
             text=True
         )
         
-        print(report_result.stdout)
         
         # Generate HTML report
         html_result = subprocess.run(
@@ -108,14 +78,11 @@ def run_coverage_report():
         )
         
         if html_result.returncode == 0:
-            print("\n✓ HTML coverage report generated in htmlcov/")
         
         return True
     except FileNotFoundError:
-        print("⚠ Coverage tool not found. Install with: pip install coverage")
         return False
     except Exception as e:
-        print(f"✗ Error generating coverage report: {e}")
         return False
 
 

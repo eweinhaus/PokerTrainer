@@ -31,19 +31,15 @@ def test_4bet_labeling():
 
     # Test the context detection
     context = ActionLabeling.get_context_from_state(game_state, player_id=1)
-    print(f"Context for AI (player 1): {context}")
 
     # Test the action labeling for RAISE_HALF_POT (action 2)
     action_label = ActionLabeling.get_action_label(2, context, bet_amount=30)  # AI raising to 30 total
-    print(f"Action label for RAISE_HALF_POT: {action_label}")
 
     # Expected: "4-bet to 15BB" (since facing a 3-bet to 10BB)
     expected = "4-bet to 15BB"
     if action_label == expected:
-        print(f"✅ SUCCESS: Got expected label '{expected}'")
         return True
     else:
-        print(f"❌ FAILED: Expected '{expected}', got '{action_label}'")
         return False
 
 if __name__ == "__main__":
@@ -69,7 +65,6 @@ if __name__ == "__main__":
         sys.exit(0 if success else 1)
 
     except Exception as e:
-        print(f"Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

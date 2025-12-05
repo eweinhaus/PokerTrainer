@@ -46,9 +46,6 @@ def test_facing_bet_detection():
     bet_to_call = context.get('bet_to_call', 0)
     bet_to_call_bb = context.get('bet_to_call_bb', 0)
 
-    print(f"facing_bet: {facing_bet}")
-    print(f"bet_to_call: {bet_to_call}")
-    print(f"bet_to_call_bb: {bet_to_call_bb}")
 
     # SB bet 96, BB bet 98, so BB is not facing additional bet
     # But wait, let me recalculate...
@@ -206,7 +203,6 @@ def test_facing_bet_detection():
 
     # Let me just create a test where SB has bet more than BB's blind, so BB faces a bet
 
-    print("Testing facing_bet calculation...")
 
     # Test case 1: SB raised, BB faces bet
     test_state = {
@@ -235,35 +231,24 @@ def test_facing_bet_detection():
     big_blind = raw_obs.get('big_blind', 2)
     stakes = raw_obs.get('stakes', [100, 100])
 
-    print(f"Debug - raw raised: {raw_obs.get('raised')}")
-    print(f"Debug - raised var: {raised}")
-    print(f"Debug - stage: {stage}")
-    print(f"Debug - condition met: {len(raised) == 2 and raised[0] == 0 and raised[1] == 0 and stage == 0}")
 
     if len(raised) == 2 and raised[0] == 0 and raised[1] == 0 and stage == 0:
         sb_post = big_blind // 2
         bb_post = big_blind
         raised = [max(0, stakes[0] - sb_post), max(0, stakes[1] - bb_post)]
-        print(f"Debug - calculated raised: {raised}")
 
     our_raised = raised[1] if len(raised) > 1 else 0
     opponent_raised = raised[0] if len(raised) > 0 else 0
     facing_bet = opponent_raised > our_raised
-    print(f"Debug - our_raised: {our_raised}, opponent_raised: {opponent_raised}, facing_bet: {facing_bet}")
 
     context = agent._build_context(test_state)
 
-    print(f"Test 1 - SB raised scenario:")
-    print(f"  facing_bet: {context.get('facing_bet')}")
-    print(f"  bet_to_call: {context.get('bet_to_call')}")
-    print(f"  bet_to_call_bb: {context.get('bet_to_call_bb')}")
 
     # Should be facing a bet
     assert context.get('facing_bet') == True, "Should be facing a bet when SB raised"
     assert context.get('bet_to_call') == 25, "Should need to call 25 chips"
     assert abs(context.get('bet_to_call_bb') - 0.5) < 0.1, "Should be 0.5 BB bet"
 
-    print("✓ Test 1 passed: Correctly detects facing bet")
 
     # Test case 2: The original problematic scenario (modified to make sense)
     # Let's assume the original stakes [96, 98] means something else
@@ -288,9 +273,6 @@ def test_facing_bet_detection():
     }
 
     context2 = agent._build_context(original_state)
-    print(f"\nTest 2 - Original scenario:")
-    print(f"  facing_bet: {context2.get('facing_bet')}")
-    print(f"  bet_to_call: {context2.get('bet_to_call')}")
 
     # With stakes [96, 98] and big_blind = 2:
     # SB posted 1, raised to 96 (way more)
@@ -330,8 +312,6 @@ def test_facing_bet_detection():
 
     # Let me check the position logic
 
-    print(f"  user_position: {context2.get('user_position')}")
-    print(f"  opponent_position: {context2.get('opponent_position')}")
 
     # dealer_id = 0 (user is dealer/SB), current_player = 1 (opponent is BB)
     # So user_position should be 'small_blind', opponent_position = 'big_blind'
@@ -408,10 +388,6 @@ def test_facing_bet_detection():
     }
 
     context3 = agent._build_context(clear_raise_state)
-    print(f"\nTest 3 - Clear SB raise scenario:")
-    print(f"  facing_bet: {context3.get('facing_bet')}")
-    print(f"  bet_to_call: {context3.get('bet_to_call')}")
-    print(f"  bet_to_call_bb: {context3.get('bet_to_call_bb')}")
 
     # With stakes [6, 2], big_blind = 2:
     # sb_post = 1, bb_post = 2
@@ -422,9 +398,7 @@ def test_facing_bet_detection():
     assert context3.get('facing_bet') == True, "Should detect facing bet"
     assert context3.get('bet_to_call') == 4, "Should need to call 4 chips"
 
-    print("✓ Test 3 passed: Correctly detects facing bet in clear raise scenario")
 
-    print("\nAll tests passed! The fix correctly calculates raised amounts when missing.")
 
 if __name__ == "__main__":
     test_facing_bet_detection()

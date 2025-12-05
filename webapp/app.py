@@ -1876,8 +1876,14 @@ class GameManager:
             # Get additional context from game state if available
             all_chips = [0, 0]
             big_blind = 2
+            dealer_id = None
+            position = None
             if session_id in self.games:
                 game = self.games[session_id]
+                env = game.get('env')
+                # Get dealer_id to determine position
+                if env and hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                    dealer_id = env.game.dealer_id
                 # Get chip counts from game state if available
                 if hasattr(game.get('env', None), 'game') and hasattr(game['env'].game, 'players'):
                     try:
@@ -1887,6 +1893,15 @@ class GameManager:
                 # Get big blind from stakes if available
                 if stakes_converted and len(stakes_converted) >= 2:
                     big_blind = max(stakes_converted) if stakes_converted else 2
+            
+            # Determine position based on dealer_id (heads-up: dealer is BB, non-dealer is SB/button)
+            if dealer_id is not None:
+                if player_id == 0:
+                    # Player 0: if dealer_id == 0, player is BB; if dealer_id == 1, player is button
+                    position = 'big_blind' if dealer_id == 0 else 'button'
+                else:
+                    # Player 1: if dealer_id == 1, player is BB; if dealer_id == 0, player is button
+                    position = 'big_blind' if dealer_id == 1 else 'button'
             
             # Build decision record
             decision = {
@@ -1898,7 +1913,8 @@ class GameManager:
                 'public_cards': raw_obs.get('public_cards', []),
                 'stakes': stakes_converted,
                 'all_chips': all_chips,  # Add chip counts for context
-                'big_blind': big_blind  # Add big blind for context
+                'big_blind': big_blind,  # Add big blind for context
+                'position': position  # Add position for context
             }
             
             hand_history_storage[session_id].append(decision)

@@ -36,7 +36,7 @@ class MockEnvironment:
         self.game = MockGame()
         self.game_state = {
             'stage': 0,  # Preflop
-            'pot': 3,    # SB + BB
+            'pot': 1.5,  # SB + BB in BB units
             'public_cards': [],
             'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
             'raised': [1, 2],  # SB: 1, BB: 2
@@ -51,7 +51,7 @@ class MockEnvironment:
         """Reset the game and return initial state"""
         self.game_state = {
             'stage': 0,  # Preflop
-            'pot': 3,    # SB + BB
+            'pot': 1.5,  # SB + BB in BB units
             'public_cards': [],
             'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
             'raised': [1, 2],  # SB: 1, BB: 2
@@ -102,8 +102,9 @@ class MockEnvironment:
         for i, player in enumerate(self.game.players):
             player.in_chips = self.game_state['raised'][i]
 
-        # Update pot
-        self.game_state['pot'] = sum(self.game_state['raised'])
+        # Update pot in BB units
+        big_blind = self.game_state.get('big_blind', 2)
+        self.game_state['pot'] = sum(self.game_state['raised']) / big_blind
 
         # Switch to next player
         self.game_state['current_player'] = opponent

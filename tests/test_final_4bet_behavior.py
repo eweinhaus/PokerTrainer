@@ -12,7 +12,6 @@ from webapp.coach.action_labeling import ActionLabeling
 def test_complete_4bet_workflow():
     """Test the complete workflow: 3-bet shows 4-bet option, 4-bet+ shows only fold/call/all-in"""
 
-    print("Testing complete 4-bet workflow...")
 
     # Test 1: Facing a 3-bet (10BB) should show 4-bet option
     game_state_3bet = {
@@ -33,9 +32,6 @@ def test_complete_4bet_workflow():
     context_3bet = ActionLabeling.get_context_from_state(game_state_3bet, player_id=0)
     labels_3bet = ActionLabeling.get_button_labels(context_3bet)
 
-    print(f"Facing 3-bet (10BB): betting_level={context_3bet['betting_level']}")
-    print(f"  Show raise buttons: {labels_3bet['showRaiseHalfPot']}, {labels_3bet['showRaisePot']}")
-    print(f"  Raise label: {labels_3bet['raiseHalfPot']}")
 
     # Test 2: Facing a 4-bet (25BB+) should hide raise options
     game_state_4bet = {
@@ -56,9 +52,6 @@ def test_complete_4bet_workflow():
     context_4bet = ActionLabeling.get_context_from_state(game_state_4bet, player_id=0)
     labels_4bet = ActionLabeling.get_button_labels(context_4bet)
 
-    print(f"Facing 4-bet (25BB): betting_level={context_4bet['betting_level']}")
-    print(f"  Show raise buttons: {labels_4bet['showRaiseHalfPot']}, {labels_4bet['showRaisePot']}")
-    print(f"  Available actions: Fold, {labels_4bet['checkCall']}, All-In")
 
     # Verify expectations
     success = True
@@ -67,19 +60,15 @@ def test_complete_4bet_workflow():
     if not (context_3bet['betting_level'] == 1 and
             labels_3bet['showRaiseHalfPot'] == True and
             labels_3bet['raiseHalfPot'] == '4-bet to 25 BB'):
-        print("❌ FAILED: Facing 3-bet should show 4-bet option")
         success = False
     else:
-        print("✅ Facing 3-bet correctly shows 4-bet option")
 
     # Facing 4-bet: should hide raise options
     if not (context_4bet['betting_level'] == 2 and
             labels_4bet['showRaiseHalfPot'] == False and
             labels_4bet['showRaisePot'] == False):
-        print("❌ FAILED: Facing 4-bet should hide raise options")
         success = False
     else:
-        print("✅ Facing 4-bet correctly hides raise options (only fold/call/all-in)")
 
     return success
 
@@ -103,14 +92,11 @@ if __name__ == "__main__":
             RIVER = 3
 
         if test_complete_4bet_workflow():
-            print("\n🎉 Complete 4-bet workflow test passed!")
             sys.exit(0)
         else:
-            print("\n❌ Test failed")
             sys.exit(1)
 
     except Exception as e:
-        print(f"Test failed with error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
