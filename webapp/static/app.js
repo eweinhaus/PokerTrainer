@@ -1062,11 +1062,7 @@ class PokerGame {
                         actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
                     }
                 }
-                // Add bet amount for Call actions (but not Check - Check has bet_amount = 0)
-                else if (displayAction === 'Call' && action.bet_amount > 0) {
-                    const betBB = (action.bet_amount / bigBlind).toFixed(1);
-                    actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
-                }
+                // Removed bet amount display for Call actions - keep "Call" text only
                 // Add bet amount for Blind actions
                 else if (action.action.includes('Blind') && action.bet_amount > 0) {
                     const betBB = (action.bet_amount / bigBlind).toFixed(1);

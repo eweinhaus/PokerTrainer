@@ -293,9 +293,15 @@ class ActionLabeling:
             return 'Fold'
         elif action_value == 1:
             # Check or Call
-            if bet_amount is not None:
-                return 'Call' if bet_amount > 0 else 'Check'
-            return 'Call' if context.get('is_facing_bet', False) else 'Check'
+            is_facing_bet = context.get('is_facing_bet', False)
+            if not is_facing_bet:
+                # Not facing a bet, so it must be a Check regardless of bet_amount
+                return 'Check'
+            else:
+                # Facing a bet, determine based on bet_amount or default to Call
+                if bet_amount is not None:
+                    return 'Call' if bet_amount > 0 else 'Check'
+                return 'Call'
         elif action_value == 2:
             # RAISE_HALF_POT
             return ActionLabeling._get_raise_label(context, bet_amount, is_half_pot=True)
