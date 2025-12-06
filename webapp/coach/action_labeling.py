@@ -292,18 +292,14 @@ class ActionLabeling:
         if action_value == 0:
             return 'Fold'
         elif action_value == 1:
-            # Check or Call
-            # Priority 1: Use bet_amount if available (most reliable)
-            if bet_amount is not None:
-                return 'Call' if bet_amount > 0 else 'Check'
-            
-            # Priority 2: Fall back to context-based detection
+            # Check or Call - always use context-based detection
+            # bet_amount is not reliable for CHECK_CALL actions (always 0 in tracking)
             is_facing_bet = context.get('is_facing_bet', False)
             if not is_facing_bet:
                 # Not facing a bet, so it must be a Check
                 return 'Check'
             else:
-                # Facing a bet, default to Call
+                # Facing a bet, so it must be a Call
                 return 'Call'
         elif action_value == 2:
             # RAISE_HALF_POT

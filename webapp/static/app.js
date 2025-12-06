@@ -13,6 +13,11 @@ class PokerGame {
         this.lastHandId = null;  // Track last analyzed hand
         this.lastPlayerHand = null;  // Track last rendered player hand to prevent unnecessary re-renders
         
+        // Track in_chips amounts at the start of each betting round
+        // in_chips is cumulative for the entire hand, so we can calculate per-round bets
+        // by subtracting the in_chips at round start from current in_chips
+        this.inChipsAtRoundStart = [0, 0];
+        
         // Set chat manager session ID
         if (window.chatManager) {
             window.chatManager.setSessionId(this.sessionId);
@@ -133,6 +138,7 @@ class PokerGame {
             this.displayedActionCount = 0;
             this.lastStage = null;
             this.lastPlayerHand = null;  // Reset last hand when starting new game
+            this.inChipsAtRoundStart = [0, 0];  // Reset round start tracking
 
             const response = await fetch('/api/game/start', {
                 method: 'POST',
@@ -804,83 +810,122 @@ class PokerGame {
         if (!this.gameState) return;
 
         const bigBlind = this.gameState.big_blind || 2;
-        const raised = this.gameState.raised || [0, 0];
+        // Ensure we're using the raised array from gameState
+        // It should be cumulative for the entire hand
+        const raised = Array.isArray(this.gameState.raised) 
+            ? this.gameState.raised 
+            : [0, 0];
         const in_chips = this.gameState.in_chips || [0, 0];
         
         // Check if stage changed (new round started) - bet amounts should be cleared
         const currentStage = this.gameState.stage || 0;
         const stageChanged = (this.lastStage !== null && this.lastStage !== currentStage);
+        
+        // When stage changes, update the baseline for calculating per-round bets
+        // in_chips is cumulative for the entire hand, so we track it at the start of each betting round
+        if (stageChanged) {
+            // Store current in_chips values as the baseline for the new betting round
+            // This allows us to calculate: current round bet = current in_chips - in_chips at round start
+            this.inChipsAtRoundStart = [in_chips[0] || 0, in_chips[1] || 0];
+        }
+        
+        // If this is the first update (lastStage is null), initialize the baseline
+        // For preflop, start with [0, 0] so that blinds are included in the round bet
+        // For postflop, use current in_chips as baseline (should already include preflop bets)
+        if (this.lastStage === null) {
+            if (currentStage === 0) {
+                // Preflop: start with [0, 0] so blinds count as bets in this round
+                this.inChipsAtRoundStart = [0, 0];
+            } else {
+                // Postflop: use current in_chips as baseline (should already include preflop bets)
+                this.inChipsAtRoundStart = [in_chips[0] || 0, in_chips[1] || 0];
+            }
+        }
+        
         this.lastStage = currentStage;
 
-        // Calculate bet amounts to display
-        // Show the TOTAL amount each player has bet THIS ROUND (including blinds)
-        // For preflop, raised array might not include blinds, so we need to add them
+        // Calculate bet amounts for THIS ROUND
+        // Show the TOTAL amount each player has bet THIS ROUND (cumulative within the round)
+        // Calculate as: current in_chips - in_chips at start of round
+        // in_chips is cumulative for the entire hand, so the difference gives us the per-round bet
+        let playerBet = (in_chips[0] || 0) - this.inChipsAtRoundStart[0];
+        let opponentBet = (in_chips[1] || 0) - this.inChipsAtRoundStart[1];
+        
+        // Ensure bet amounts are non-negative
+        playerBet = Math.max(0, playerBet);
+        opponentBet = Math.max(0, opponentBet);
+        
+        // For preflop, if the calculated bet is 0 but in_chips includes a blind amount,
+        // it means the blind was posted but not yet reflected in the difference.
+        // In this case, we should show the blind amount.
         const isPreflop = currentStage === 0;
         const buttonId = this.gameState.button_id;
+        const epsilon = 0.01;
         
-        let playerBet = raised[0] || 0;
-        let opponentBet = raised[1] || 0;
-        
-        // For preflop, ensure blinds are included in the total bet amount
-        // RLCard's raised array represents the raise amount above the blind, not the total
-        // So we need to add the blind to get the total bet for the round
         if (isPreflop && buttonId !== null && buttonId !== undefined) {
             const smallBlind = bigBlind / 2;
-            const epsilon = 0.01; // Small tolerance for floating point comparison
             
-            // In HUNL: button_id 0 = SB (acts first), button_id 1 = BB
-            if (buttonId === 0) {
-                // Player 0 is SB, Player 1 is BB
-                // If raised amount is greater than the blind, it's a raise (add blind)
-                // If raised amount equals the blind (within epsilon), it already includes it
-                if (playerBet > smallBlind + epsilon) {
-                    // This is a raise amount above the blind, add the blind to get total
-                    playerBet += smallBlind;
+            // Only apply this logic if bet is 0 or very small (just blind posted, no raises yet)
+            // If player has raised, playerBet should already be > epsilon
+            if (playerBet <= epsilon) {
+                // Check if in_chips[0] actually contains a blind amount
+                if (buttonId === 0) {
+                    // Player 0 is SB
+                    if ((in_chips[0] || 0) >= smallBlind * 0.9) {
+                        playerBet = in_chips[0] || 0;
+                    }
+                } else {
+                    // Player 0 is BB
+                    if ((in_chips[0] || 0) >= bigBlind * 0.9) {
+                        playerBet = in_chips[0] || 0;
+                    }
                 }
-                if (opponentBet > bigBlind + epsilon) {
-                    // This is a raise amount above the blind, add the blind to get total
-                    opponentBet += bigBlind;
-                }
-            } else {
-                // Player 0 is BB, Player 1 is SB
-                if (playerBet > bigBlind + epsilon) {
-                    // This is a raise amount above the blind, add the blind to get total
-                    playerBet += bigBlind;
-                }
-                if (opponentBet > smallBlind + epsilon) {
-                    // This is a raise amount above the blind, add the blind to get total
-                    opponentBet += smallBlind;
+            }
+            
+            if (opponentBet <= epsilon) {
+                // Check if in_chips[1] actually contains a blind amount
+                if (buttonId === 0) {
+                    // Player 1 is BB
+                    if ((in_chips[1] || 0) >= bigBlind * 0.9) {
+                        opponentBet = in_chips[1] || 0;
+                    }
+                } else {
+                    // Player 1 is SB
+                    if ((in_chips[1] || 0) >= smallBlind * 0.9) {
+                        opponentBet = in_chips[1] || 0;
+                    }
                 }
             }
         }
         
-        // Debug logging (can be removed in production)
-        if (window.DEBUG_POKER && (playerBet > 0 || opponentBet > 0)) {
+        // Debug logging - always log to help diagnose the issue
+        if (window.DEBUG_POKER) {
             console.log('Bet amounts update:', {
                 playerBet,
                 opponentBet,
-                raised,
                 in_chips,
+                inChipsAtRoundStart: this.inChipsAtRoundStart,
+                raised, // Keep for reference
+                calculation: {
+                    playerCalc: `${in_chips[0]} - ${this.inChipsAtRoundStart[0]} = ${playerBet}`,
+                    opponentCalc: `${in_chips[1]} - ${this.inChipsAtRoundStart[1]} = ${opponentBet}`
+                },
                 stageChanged,
                 currentStage,
                 bigBlind,
                 buttonId,
-                isPreflop
+                isPreflop,
+                willShowPlayer: playerBet > 0 && !stageChanged,
+                willShowOpponent: opponentBet > 0 && !stageChanged
             });
         }
-        
-        // Note: Bet amounts are now reliably tracked via raised array from backend
-        // No need for fallback inference from action history
-        
-        // Calculate unmatched amounts (for pot calculation)
-        const playerUnmatched = Math.max(0, playerBet - opponentBet);
-        const opponentUnmatched = Math.max(0, opponentBet - playerBet);
 
-        // Update player bet amount (show actual bet amount, not just unmatched)
+        // Update player bet amount display
         const playerBetEl = document.getElementById('playerBetAmount');
         if (playerBetEl) {
             const betValueEl = playerBetEl.querySelector('.bet-value');
-            // Show bet amount if player has bet this round, and stage hasn't just changed
+            // Show bet amount if player has bet this round
+            // Hide when stage changes (new round starts)
             if (playerBet > 0 && !stageChanged && betValueEl) {
                 const betBB = (playerBet / bigBlind).toFixed(1);
                 const wasHidden = !playerBetEl.classList.contains('show');
@@ -894,20 +939,38 @@ class PokerGame {
                     playerBetEl.classList.add('bet-update');
                     setTimeout(() => playerBetEl.classList.remove('bet-update'), 1000);
                 }
+                // Debug logging
+                if (window.DEBUG_POKER) {
+                    console.log('Showing player bet:', {
+                        playerBet,
+                        betBB,
+                        stageChanged,
+                        hasShowClass: playerBetEl.classList.contains('show')
+                    });
+                }
             } else {
                 // Hide when stage changes (new round) or no bet
                 if (betValueEl) {
                     betValueEl.textContent = '';
                 }
                 playerBetEl.classList.remove('show');
+                // Debug logging
+                if (window.DEBUG_POKER) {
+                    console.log('Hiding player bet:', {
+                        playerBet,
+                        stageChanged,
+                        reason: !playerBet > 0 ? 'no bet' : 'stage changed'
+                    });
+                }
             }
         }
 
-        // Update opponent bet amount (show actual bet amount, not just unmatched)
+        // Update opponent bet amount display
         const opponentBetEl = document.getElementById('opponentBetAmount');
         if (opponentBetEl) {
             const betValueEl = opponentBetEl.querySelector('.bet-value');
-            // Show bet amount if opponent has bet this round, and stage hasn't just changed
+            // Show bet amount if opponent has bet this round
+            // Hide when stage changes (new round starts)
             if (opponentBet > 0 && !stageChanged && betValueEl) {
                 const betBB = (opponentBet / bigBlind).toFixed(1);
                 const wasHidden = !opponentBetEl.classList.contains('show');
@@ -921,12 +984,29 @@ class PokerGame {
                     opponentBetEl.classList.add('bet-update');
                     setTimeout(() => opponentBetEl.classList.remove('bet-update'), 1000);
                 }
+                // Debug logging
+                if (window.DEBUG_POKER) {
+                    console.log('Showing opponent bet:', {
+                        opponentBet,
+                        betBB,
+                        stageChanged,
+                        hasShowClass: opponentBetEl.classList.contains('show')
+                    });
+                }
             } else {
                 // Hide when stage changes (new round) or no bet
                 if (betValueEl) {
                     betValueEl.textContent = '';
                 }
                 opponentBetEl.classList.remove('show');
+                // Debug logging
+                if (window.DEBUG_POKER) {
+                    console.log('Hiding opponent bet:', {
+                        opponentBet,
+                        stageChanged,
+                        reason: !opponentBet > 0 ? 'no bet' : 'stage changed'
+                    });
+                }
             }
         }
     }
@@ -935,7 +1015,8 @@ class PokerGame {
         // Use new event-based history (hand_events) if available, fallback to legacy action_history
         const handEvents = this.gameState?.hand_events || [];
         const legacyHistory = this.gameState?.action_history || [];
-        
+
+
         const historyContainer = document.getElementById('actionHistory');
         if (!historyContainer) return;
 

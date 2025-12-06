@@ -577,6 +577,19 @@ header h1 {
     font-size: 0.9em;
 }
 
+.action-entry.win-entry {
+    background: rgba(255, 215, 0, 0.2);
+    border-left-color: #FFD700;
+    font-weight: bold;
+    text-align: center;
+}
+
+.action-entry.win-entry .win-label {
+    color: #FFD700;
+    font-size: 0.9em;
+    text-shadow: 0 0 3px rgba(255, 215, 0, 0.5);
+}
+
 @keyframes slideIn {
     from {
         opacity: 0;

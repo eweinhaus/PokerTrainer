@@ -587,11 +587,21 @@ class GameManager:
                 # Convert decision records to action history format
                 for decision in hand_history_storage[session_id]:
                     bet_amount = decision.get('bet_amount', None)
+                    stored_context = decision.get('context')
+
+                    # Use stored context if available, otherwise fall back to current state reconstruction
+                    if stored_context is not None:
+                        # Use the stored context for accurate action labeling
+                        action_label = ActionLabeling.get_action_label(decision['action'], stored_context, bet_amount=bet_amount)
+                    else:
+                        # Fallback to original method if no stored context
+                        action_label = self._action_to_string(decision['action'], env, state, decision['player_id'], bet_amount)
+
                     action_entry = {
                         'type': 'action',
                         'player_id': decision['player_id'],
                         'player_name': 'You' if decision['player_id'] == 0 else 'Opponent',
-                        'action': self._action_to_string(decision['action'], env, state, decision['player_id'], bet_amount),
+                        'action': action_label,
                         'stage': decision['stage'],
                         'pot': decision['pot'],
                         'hand': decision.get('hand', []),
@@ -1985,6 +1995,24 @@ class GameManager:
             except Exception as e:
                 bet_amount = 0
 
+            # CRITICAL FIX: Store context information for correct action labeling
+            # This fixes the bug where Call actions show as "Check" in action history
+            context = None
+            try:
+                if session_id in self.games:
+                    game = self.games[session_id]
+                    env = game.get('env')
+                    # Build state dict with both raw_obs and processed fields for ActionLabeling
+                    state_with_processed = {
+                        'raw_obs': raw_obs,
+                        'in_chips': state.get('in_chips', [0, 0]) if isinstance(state, dict) else [0, 0],
+                        'raised': raw_obs.get('raised', [0, 0])
+                    }
+                    context = ActionLabeling.get_context_from_state(state_with_processed, player_id=player_id, env=env)
+            except Exception as e:
+                logger.debug(f"Could not extract context for action labeling: {e}")
+                context = None
+
             # Create decision record
             decision_record = {
                 'player_id': player_id,
@@ -1994,6 +2022,7 @@ class GameManager:
                 'hand': hand_cards,
                 'public_cards': public_cards,
                 'bet_amount': bet_amount,
+                'context': context,  # Store context for correct action labeling
                 'timestamp': time.time()
             }
 
