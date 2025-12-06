@@ -159,7 +159,7 @@ header h1 {
     position: relative;
     display: grid;
     grid-template-columns: 1fr;
-    gap: 8px;
+    gap: 16px;
     align-items: start;
     margin-left: 260px;
     margin-right: 360px;
@@ -182,7 +182,8 @@ header h1 {
     align-items: center;
     justify-content: center;
     gap: 3px;
-    margin: 2px 0;
+    margin: 8px 0;
+    padding: 4px 0;
     max-width: 600px;
     width: 100%;
     text-align: center;
@@ -252,10 +253,12 @@ header h1 {
 
 .opponent-section {
     margin-top: 0;
+    padding-bottom: 12px;
 }
 
 .player-section-bottom {
     margin-bottom: 0;
+    padding-top: 12px;
 }
 
 .player-header {
@@ -280,9 +283,10 @@ header h1 {
     align-items: center;
     gap: 5px;
     justify-content: center;
-    margin: 2px 0;
+    margin: 4px 0;
     position: relative;
     width: 100%;
+    min-height: 80px;
 }
 
 .action-text-overlay {
@@ -311,19 +315,19 @@ header h1 {
 }
 
 .opponent-section .bet-amount-display {
-    margin-top: 4px;
-    position: relative;
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    margin-top: 12px;
     z-index: 10;
-    min-height: 32px; /* Reserve space to prevent layout shift */
-    display: flex;
 }
 
 .player-section-bottom .bet-amount-display {
-    margin-bottom: 4px;
-    position: relative;
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    margin-bottom: 12px;
     z-index: 10;
-    min-height: 32px; /* Reserve space to prevent layout shift */
-    display: flex;
 }
 
 .dealer-chip-icon {
@@ -357,36 +361,38 @@ header h1 {
 }
 
 .bet-amount-display {
-    background: var(--bg-secondary);
-    border: 1px solid #000;
-    border-radius: var(--radius-sm);
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
     padding: 4px 8px;
-    margin: 0 auto;
     text-align: center;
     flex-direction: column;
     align-items: center;
     justify-content: center;
     min-width: 55px;
     max-width: 70px;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-    position: relative;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+    display: none;
     opacity: 0;
     visibility: hidden;
-    transform: scale(0.9);
+    transform: translateX(-50%) scale(0.9);
     transition: opacity 0.3s ease, visibility 0.3s ease, transform 0.3s ease;
+    white-space: nowrap;
 }
 
-.bet-amount-display[style*="flex"] {
-    opacity: 1;
-    visibility: visible;
-    transform: scale(1);
+.bet-amount-display.show {
+    display: flex !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    transform: translateX(-50%) scale(1) !important;
 }
 
 .bet-value {
-    font-size: 0.85em;
+    font-size: 0.75em;
     font-weight: var(--font-weight-bold);
     color: #fff;
     line-height: 1.2;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.8);
 }
 
 
@@ -434,7 +440,8 @@ header h1 {
     align-items: center;
     justify-content: center;
     text-align: center;
-    margin: 4px 0;
+    margin: 10px 0;
+    padding: 4px 0;
     grid-column: 1;
     max-width: 600px;
     width: 100%;
@@ -466,7 +473,7 @@ header h1 {
     text-align: center;
     font-size: 0.9em;
     font-weight: bold;
-    margin: 10px 0;
+    margin: 12px 0;
     padding: 6px 10px;
     background: rgba(0, 0, 0, 0.3);
     border-radius: 6px;
@@ -661,28 +668,28 @@ header h1 {
 @keyframes betAppear {
     0% {
         opacity: 0;
-        transform: translateY(-5px) scale(0.95);
+        transform: translateX(-50%) translateY(-5px) scale(0.95);
     }
     50% {
-        transform: translateY(0) scale(1.05);
+        transform: translateX(-50%) translateY(0) scale(1.05);
     }
     100% {
         opacity: 1;
-        transform: translateY(0) scale(1);
+        transform: translateX(-50%) translateY(0) scale(1);
     }
 }
 
 @keyframes betUpdate {
     0% {
-        transform: scale(1);
+        transform: translateX(-50%) scale(1);
         border-color: #000;
     }
     50% {
-        transform: scale(1.05);
+        transform: translateX(-50%) scale(1.05);
         border-color: #000;
     }
     100% {
-        transform: scale(1);
+        transform: translateX(-50%) scale(1);
         border-color: #000;
     }
 }

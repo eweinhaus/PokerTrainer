@@ -353,8 +353,9 @@ class GameManager:
                 for player_id, payoff in enumerate(payoffs):
                     if payoff > 0:
                         big_blind = raw_obs.get('big_blind', 2)
-                        win_amount_bb = payoff / big_blind if big_blind > 0 else 0
-                        self._emit_win_event(session_id, player_id, win_amount_bb)
+                        pot = raw_obs.get('pot', 0)
+                        pot_bb = pot / big_blind if big_blind > 0 else 0
+                        self._emit_win_event(session_id, player_id, pot_bb)
                         break
         
         # Get human player's hand (player 0) directly from the game object
@@ -559,7 +560,6 @@ class GameManager:
         # The pot was already calculated with reconstructed raised array above, so this is just for logging
         final_pot = calculate_pot(raised, game_state.get('big_blind', 2), dealer_id, stage)
         if final_pot > 0 and final_pot != pot:
-            logger.info(f"💰 [POT_FINAL] Final pot recalculation: {final_pot} chips ({pot_to_bb(final_pot, game_state.get('big_blind', 2)):.1f} BB) with raised: {raised}")
             game_state['pot'] = final_pot
         else:
             game_state['pot'] = pot
@@ -796,6 +796,7 @@ class GameManager:
             
             # Generate action label
             label = ActionLabeling.get_action_label(action_value, context, bet_amount)
+            logger.debug(f"📊 [ACTION_LABEL] action_value={action_value}, bet_amount={bet_amount}, is_facing_bet={context.get('is_facing_bet', False)}, label={label}")
             
             # Create and emit event
             event = HandEvent(
@@ -862,7 +863,7 @@ class GameManager:
         except Exception as e:
             logger.warning(f"📋 [COMMUNITY_CARDS] Error emitting community card event for session {session_id}: {str(e)}")
     
-    def _emit_win_event(self, session_id, winner_id, amount):
+    def _emit_win_event(self, session_id, winner_id, pot_bb):
         """Emit a win event when hand concludes"""
         try:
             if session_id not in self.games:
@@ -872,14 +873,17 @@ class GameManager:
             if 'hand_events' not in game:
                 game['hand_events'] = []
             
-            # Create and emit event
+            # Determine player name
+            player_name = 'You' if winner_id == 0 else 'Opponent'
+            
+            # Create and emit event with formatted label
             event = HandEvent(
                 stage='showdown',
                 kind='win',
                 player_idx=winner_id,
-                amount=amount,
+                amount=pot_bb,
                 pot=0.0,  # Pot is distributed, so 0 remaining
-                label=f'Wins {amount:.1f} BB' if amount else 'Wins'
+                label=f'{player_name} wins pot of {pot_bb:.1f} BB'
             )
             game['hand_events'].append(event)
             
@@ -1684,20 +1688,33 @@ class GameManager:
             # Calculate bet amount for event emission
             bet_amount = None
             try:
-                previous_pot = raw_obs.get('pot', 0)
-                current_pot = next_raw_obs.get('pot', 0)
-                pot_increase = current_pot - previous_pot
+                # Get raised amounts before and after action
+                previous_raised = raw_obs.get('raised', [0, 0])
+                next_raised = next_raw_obs.get('raised', [0, 0])
                 
-                if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
-                    bet_amount = current_pot
-                elif action_value == 1:  # Check/Call
-                    # Get call amount from raised array
-                    raised = next_raw_obs.get('raised', [0, 0])
+                if action_value in [2, 3, 4]:  # Raise actions
+                    # For raises, bet_amount is the total amount raised TO
                     if current_player == 0:
-                        bet_amount = raised[0] if len(raised) > 0 else 0
+                        bet_amount = next_raised[0] if len(next_raised) > 0 else 0
                     else:
-                        bet_amount = raised[1] if len(raised) > 1 else 0
-            except Exception:
+                        bet_amount = next_raised[1] if len(next_raised) > 1 else 0
+                elif action_value == 1:  # Check/Call
+                    # For Check/Call, calculate the amount needed to call using PREVIOUS state
+                    # After a call, raised array equalizes, so we need to use before-state
+                    if current_player == 0:
+                        opponent_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
+                        player_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
+                        call_amount = opponent_raised_before - player_raised_before
+                        bet_amount = call_amount if call_amount > 0 else 0
+                        logger.debug(f"📊 [CALL_CALC] Player 0: opponent_raised={opponent_raised_before}, player_raised={player_raised_before}, call_amount={call_amount}, bet_amount={bet_amount}")
+                    else:
+                        opponent_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
+                        player_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
+                        call_amount = opponent_raised_before - player_raised_before
+                        bet_amount = call_amount if call_amount > 0 else 0
+                        logger.debug(f"📊 [CALL_CALC] Player 1: opponent_raised={opponent_raised_before}, player_raised={player_raised_before}, call_amount={call_amount}, bet_amount={bet_amount}")
+            except Exception as e:
+                logger.warning(f"Error calculating bet_amount for player event: {e}")
                 bet_amount = None
 
             # Emit action event
@@ -1857,20 +1874,31 @@ class GameManager:
             # Calculate bet amount for event emission
             bet_amount = None
             try:
-                previous_pot = raw_obs.get('pot', 0)
-                current_pot = next_raw_obs.get('pot', 0)
-                pot_increase = current_pot - previous_pot
+                # Get raised amounts before and after action
+                previous_raised = raw_obs.get('raised', [0, 0])
+                next_raised = next_raw_obs.get('raised', [0, 0])
                 
-                if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
-                    bet_amount = current_pot
-                elif action_value == 1:  # Check/Call
-                    # Get call amount from raised array
-                    raised = next_raw_obs.get('raised', [0, 0])
+                if action_value in [2, 3, 4]:  # Raise actions
+                    # For raises, bet_amount is the total amount raised TO
                     if current_player == 0:
-                        bet_amount = raised[0] if len(raised) > 0 else 0
+                        bet_amount = next_raised[0] if len(next_raised) > 0 else 0
                     else:
-                        bet_amount = raised[1] if len(raised) > 1 else 0
-            except Exception:
+                        bet_amount = next_raised[1] if len(next_raised) > 1 else 0
+                elif action_value == 1:  # Check/Call
+                    # For Check/Call, calculate the amount needed to call using PREVIOUS state
+                    # After a call, raised array equalizes, so we need to use before-state
+                    if current_player == 0:
+                        opponent_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
+                        player_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
+                        call_amount = opponent_raised_before - player_raised_before
+                        bet_amount = call_amount if call_amount > 0 else 0
+                    else:
+                        opponent_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
+                        player_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
+                        call_amount = opponent_raised_before - player_raised_before
+                        bet_amount = call_amount if call_amount > 0 else 0
+            except Exception as e:
+                logger.warning(f"Error calculating bet_amount for AI event: {e}")
                 bet_amount = None
 
             # Emit action event

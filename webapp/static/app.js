@@ -813,9 +813,61 @@ class PokerGame {
         this.lastStage = currentStage;
 
         // Calculate bet amounts to display
-        // Show the actual amount each player has bet THIS ROUND (from raised array)
+        // Show the TOTAL amount each player has bet THIS ROUND (including blinds)
+        // For preflop, raised array might not include blinds, so we need to add them
+        const isPreflop = currentStage === 0;
+        const buttonId = this.gameState.button_id;
+        
         let playerBet = raised[0] || 0;
         let opponentBet = raised[1] || 0;
+        
+        // For preflop, ensure blinds are included in the total bet amount
+        // RLCard's raised array represents the raise amount above the blind, not the total
+        // So we need to add the blind to get the total bet for the round
+        if (isPreflop && buttonId !== null && buttonId !== undefined) {
+            const smallBlind = bigBlind / 2;
+            const epsilon = 0.01; // Small tolerance for floating point comparison
+            
+            // In HUNL: button_id 0 = SB (acts first), button_id 1 = BB
+            if (buttonId === 0) {
+                // Player 0 is SB, Player 1 is BB
+                // If raised amount is greater than the blind, it's a raise (add blind)
+                // If raised amount equals the blind (within epsilon), it already includes it
+                if (playerBet > smallBlind + epsilon) {
+                    // This is a raise amount above the blind, add the blind to get total
+                    playerBet += smallBlind;
+                }
+                if (opponentBet > bigBlind + epsilon) {
+                    // This is a raise amount above the blind, add the blind to get total
+                    opponentBet += bigBlind;
+                }
+            } else {
+                // Player 0 is BB, Player 1 is SB
+                if (playerBet > bigBlind + epsilon) {
+                    // This is a raise amount above the blind, add the blind to get total
+                    playerBet += bigBlind;
+                }
+                if (opponentBet > smallBlind + epsilon) {
+                    // This is a raise amount above the blind, add the blind to get total
+                    opponentBet += smallBlind;
+                }
+            }
+        }
+        
+        // Debug logging (can be removed in production)
+        if (window.DEBUG_POKER && (playerBet > 0 || opponentBet > 0)) {
+            console.log('Bet amounts update:', {
+                playerBet,
+                opponentBet,
+                raised,
+                in_chips,
+                stageChanged,
+                currentStage,
+                bigBlind,
+                buttonId,
+                isPreflop
+            });
+        }
         
         // Note: Bet amounts are now reliably tracked via raised array from backend
         // No need for fallback inference from action history
@@ -831,11 +883,10 @@ class PokerGame {
             // Show bet amount if player has bet this round, and stage hasn't just changed
             if (playerBet > 0 && !stageChanged && betValueEl) {
                 const betBB = (playerBet / bigBlind).toFixed(1);
-                const wasHidden = !playerBetEl.style.display || playerBetEl.style.display === 'none' || playerBetEl.style.opacity === '0';
+                const wasHidden = !playerBetEl.classList.contains('show');
                 betValueEl.textContent = `${betBB} BB`;
-                playerBetEl.style.display = 'flex';
-                playerBetEl.style.opacity = '1';
-                playerBetEl.style.visibility = 'visible';
+                // Show the bet amount
+                playerBetEl.classList.add('show');
                 if (actor === 'player' && wasHidden) {
                     playerBetEl.classList.add('bet-appear');
                     setTimeout(() => playerBetEl.classList.remove('bet-appear'), 1000);
@@ -844,12 +895,11 @@ class PokerGame {
                     setTimeout(() => playerBetEl.classList.remove('bet-update'), 1000);
                 }
             } else {
-                // Hide when stage changes (new round) or no bet (but keep space reserved)
+                // Hide when stage changes (new round) or no bet
                 if (betValueEl) {
                     betValueEl.textContent = '';
                 }
-                playerBetEl.style.opacity = '0';
-                playerBetEl.style.visibility = 'hidden';
+                playerBetEl.classList.remove('show');
             }
         }
 
@@ -860,11 +910,10 @@ class PokerGame {
             // Show bet amount if opponent has bet this round, and stage hasn't just changed
             if (opponentBet > 0 && !stageChanged && betValueEl) {
                 const betBB = (opponentBet / bigBlind).toFixed(1);
-                const wasHidden = !opponentBetEl.style.display || opponentBetEl.style.display === 'none' || opponentBetEl.style.opacity === '0';
+                const wasHidden = !opponentBetEl.classList.contains('show');
                 betValueEl.textContent = `${betBB} BB`;
-                opponentBetEl.style.display = 'flex';
-                opponentBetEl.style.opacity = '1';
-                opponentBetEl.style.visibility = 'visible';
+                // Show the bet amount
+                opponentBetEl.classList.add('show');
                 if (actor === 'opponent' && wasHidden) {
                     opponentBetEl.classList.add('bet-appear');
                     setTimeout(() => opponentBetEl.classList.remove('bet-appear'), 1000);
@@ -873,12 +922,11 @@ class PokerGame {
                     setTimeout(() => opponentBetEl.classList.remove('bet-update'), 1000);
                 }
             } else {
-                // Hide when stage changes (new round) or no bet (but keep space reserved)
+                // Hide when stage changes (new round) or no bet
                 if (betValueEl) {
                     betValueEl.textContent = '';
                 }
-                opponentBetEl.style.opacity = '0';
-                opponentBetEl.style.visibility = 'hidden';
+                opponentBetEl.classList.remove('show');
             }
         }
     }
@@ -936,11 +984,9 @@ class PokerGame {
                         <span class="action-name">${event.label}</span>
                     `;
                 } else if (event.kind === 'win') {
-                    // Hand conclusion
+                    // Hand conclusion - label contains full message
                     actionEntry.className = `action-entry win-entry ${event.player_idx === 0 ? 'player-action' : 'opponent-action'}`;
-                    const playerName = event.player_idx === 0 ? 'You' : 'Opponent';
                     actionEntry.innerHTML = `
-                        <span class="player-name">${playerName}:</span>
                         <span class="win-label">${event.label}</span>
                     `;
                 }
