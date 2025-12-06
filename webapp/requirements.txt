@@ -4,4 +4,7 @@ numpy>=1.21.0
 termcolor>=1.1.0
 openai>=1.0.0
 python-dotenv>=0.19.0
+# MODIFIED: Use RLCard fork with native BB-first action order support
+# Using local modified version for development/testing
+-e ../rlcard_modified
 

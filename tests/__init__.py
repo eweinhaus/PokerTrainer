@@ -1,1 +1,5 @@
-# Tests package
+"""
+Tests for AI Poker Coach
+"""
+
+

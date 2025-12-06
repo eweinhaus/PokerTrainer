@@ -37,6 +37,7 @@ from coach.chatbot_coach import ChatbotCoach
 from coach.gto_agent import GTOAgent
 from coach.llm_opponent_agent import LLMOpponentAgent
 from coach.pot_calculator import calculate_pot_from_state, pot_to_bb, calculate_pot
+from coach.hand_events import HandEvent
 
 # Configure logging
 logging.basicConfig(
@@ -190,7 +191,46 @@ class GameManager:
     def start_game(self, session_id):
         """Start a new game for a session"""
         # Create environment
+        # TODO: Enable BB-first action order for heads-up games once RLCard fork is available
+        # This replaces the complex application-level override logic
+        # Use standard RLCard but patch it with BB-first logic
         env = rlcard.make('no-limit-holdem')
+
+        # PATCH: Apply BB-first action order logic to the game
+        if hasattr(env, 'game') and hasattr(env.game, '__class__'):
+            original_init_game = env.game.init_game
+            original_step = env.game.step
+
+            def patched_init_game(self):
+                # Call original init_game
+                result = original_init_game()
+                state, current_player = result
+
+                # Apply BB-first logic for 2-player games
+                if self.num_players == 2:
+                    # SB (player 1) acts first preflop (already set by original logic)
+                    # For postflop, we'll handle in step()
+                    pass
+
+                return result
+
+            def patched_step(self, action):
+                # Call original step
+                result = original_step(action)
+                next_state, next_player_id = result
+
+                # Apply BB-first logic for postflop stages in 2-player games
+                if (self.num_players == 2 and
+                    hasattr(self, 'round_counter') and self.round_counter >= 1 and
+                    hasattr(self, 'dealer_id')):
+                    # Postflop: BB (dealer) acts first
+                    self.game_pointer = self.dealer_id
+
+                return result
+
+            # Monkey patch the methods
+            env.game.init_game = lambda: patched_init_game(env.game)
+            env.game.step = lambda action: patched_step(env.game, action)
         
         # Create agents
         human_agent = WebHumanAgent(env.num_actions)
@@ -237,11 +277,15 @@ class GameManager:
             'hand_history': [],
             'last_stage': 0,  # Track previous stage for detecting community card deals
             'last_public_cards_count': 0,  # Track previous public cards count
-            'action_history_with_cards': [],  # Store action history with community cards
+            'action_history_with_cards': [],  # Store action history with community cards (legacy)
             'last_action_count': 0,  # Track number of actions processed
             'blinds_added': False,  # Track if blind entries have been added
-            'player_hand': player_hand.copy() if player_hand else []  # Store player's hand for the entire hand
+            'player_hand': player_hand.copy() if player_hand else [],  # Store player's hand for the entire hand
+            'hand_events': []  # New event-based history (single source of truth)
         }
+        
+        # Emit blind events immediately after game initialization
+        self._emit_blind_events(session_id, env)
         
         return self.get_game_state(session_id)
     
@@ -266,8 +310,52 @@ class GameManager:
         elif not isinstance(current_stage, int):
             current_stage = int(current_stage) if current_stage else 0
 
+        # Detect community card deals and emit events
+        last_public_cards_count = game.get('last_public_cards_count', 0)
+        current_public_cards = raw_obs.get('public_cards', [])
+        current_public_cards_count = len(current_public_cards)
+        
+        # Check if new community cards were dealt
+        if current_public_cards_count > last_public_cards_count:
+            stage_names = {1: 'flop', 2: 'turn', 3: 'river'}
+            stage_name = stage_names.get(current_stage, '')
+            
+            if stage_name == 'flop' and current_public_cards_count >= 3:
+                # Flop dealt
+                new_cards = current_public_cards[:3]
+                pot = raw_obs.get('pot', 0)
+                self._emit_community_card_event(session_id, 'Flop', new_cards, pot)
+            elif stage_name == 'turn' and current_public_cards_count >= 4:
+                # Turn dealt
+                new_cards = [current_public_cards[3]]
+                pot = raw_obs.get('pot', 0)
+                self._emit_community_card_event(session_id, 'Turn', new_cards, pot)
+            elif stage_name == 'river' and current_public_cards_count >= 5:
+                # River dealt
+                new_cards = [current_public_cards[4]]
+                pot = raw_obs.get('pot', 0)
+                self._emit_community_card_event(session_id, 'River', new_cards, pot)
+        
+        game['last_public_cards_count'] = current_public_cards_count
+        game['last_stage'] = current_stage
+
         # Track if game is over for next iteration
-        game['was_over'] = env.is_over()
+        was_over = game.get('was_over', False)
+        is_over = env.is_over()
+        game['was_over'] = is_over
+        
+        # Detect hand end and emit win event
+        if is_over and not was_over:
+            # Hand just ended, emit win event
+            payoffs = env.get_payoffs() if hasattr(env, 'get_payoffs') else None
+            if payoffs:
+                # Find winner (player with positive payoff)
+                for player_id, payoff in enumerate(payoffs):
+                    if payoff > 0:
+                        big_blind = raw_obs.get('big_blind', 2)
+                        win_amount_bb = payoff / big_blind if big_blind > 0 else 0
+                        self._emit_win_event(session_id, player_id, win_amount_bb)
+                        break
         
         # Get human player's hand (player 0) directly from the game object
         # This ensures we always have the correct hand regardless of whose turn it is
@@ -406,136 +494,9 @@ class GameManager:
                 pass
         
         # Get raised array (amount bet in current betting round)
-        # CRITICAL: RLCard resets raised array after betting rounds, so we need to reconstruct it
-        # from action history to get accurate pot calculation
+        # SIMPLIFIED: Use RLCard's natural raised array directly
+        # With native BB-first action order, RLCard's state should be consistent
         raised = raw_obs.get('raised', [0, 0])
-        
-        # Reconstruct raised array from action history for accurate pot calculation
-        # CRITICAL: For postflop, use in_chips for cumulative pot, not raised array
-        # For preflop, reconstruct raised array from action history
-        if stage == 0 and hasattr(env, 'action_recorder') and env.action_recorder:
-            try:
-                # Get action history
-                action_history = env.action_recorder
-                big_blind = raw_obs.get('big_blind', 2)
-                small_blind = big_blind // 2
-                
-                # Initialize raised array with blinds for preflop
-                reconstructed_raised = [0, 0]
-                if dealer_id is not None:  # Preflop
-                    small_blind_player = (dealer_id + 1) % 2
-                    big_blind_player = (dealer_id + 2) % 2
-                    reconstructed_raised[small_blind_player] = small_blind
-                    reconstructed_raised[big_blind_player] = big_blind
-                
-                # Replay all preflop actions to reconstruct raised array
-                for action_record in action_history:
-                    if len(action_record) >= 2:
-                        action_player_id, action_value = action_record[0], action_record[1]
-                        
-                        # Get action value as int
-                        if hasattr(action_value, 'value'):
-                            action_int = action_value.value
-                        elif isinstance(action_value, int):
-                            action_int = action_value
-                        else:
-                            try:
-                                action_int = int(action_value)
-                            except:
-                                continue
-                        
-                        # Reconstruct state to get bet amount
-                        temp_state = {
-                            'raw_obs': {
-                                'raised': reconstructed_raised.copy(),
-                                'big_blind': big_blind,
-                                'pot': calculate_pot(reconstructed_raised.copy(), big_blind, dealer_id, 0),
-                                'stage': 0
-                            }
-                        }
-                        bet_amount = self._get_bet_amount(action_int, env, action_player_id, temp_state)
-                        
-                        # Update raised array based on action
-                        if action_int in [2, 3]:  # Raise actions
-                            opponent_id = 1 - action_player_id
-                            opponent_raised = reconstructed_raised[opponent_id]
-                            if bet_amount < opponent_raised:
-                                reconstructed_raised[action_player_id] = opponent_raised + big_blind
-                            else:
-                                reconstructed_raised[action_player_id] = bet_amount
-                        elif action_int == 1:  # Call/Check
-                            opponent_id = 1 - action_player_id
-                            if reconstructed_raised[opponent_id] > reconstructed_raised[action_player_id]:
-                                reconstructed_raised[action_player_id] = reconstructed_raised[opponent_id]
-                
-                # Use reconstructed raised array for preflop
-                raised = reconstructed_raised
-            except Exception as e:
-                pass
-        else:
-            # Postflop: Reconstruct cumulative pot from full action history
-            # RLCard's in_chips may not be updated correctly across betting rounds
-            if hasattr(env, 'action_recorder') and env.action_recorder:
-                try:
-                    # Get full action history
-                    action_history = env.action_recorder
-                    big_blind = raw_obs.get('big_blind', 2)
-                    small_blind = big_blind // 2
-
-                    # Initialize cumulative pot with blinds
-                    cumulative_raised = [0, 0]
-                    if dealer_id is not None:
-                        small_blind_player = (dealer_id + 1) % 2
-                        big_blind_player = (dealer_id + 2) % 2
-                        cumulative_raised[small_blind_player] = small_blind
-                        cumulative_raised[big_blind_player] = big_blind
-
-                    # Replay ALL actions to get cumulative raised amounts
-                    for action_record in action_history:
-                        if len(action_record) >= 2:
-                            action_player_id, action_value = action_record[0], action_record[1]
-
-                            # Get action value as int
-                            if hasattr(action_value, 'value'):
-                                action_int = action_value.value
-                            elif isinstance(action_value, int):
-                                action_int = action_value
-                            else:
-                                try:
-                                    action_int = int(action_value)
-                                except:
-                                    continue
-
-                            # Reconstruct state to get bet amount
-                            temp_state = {
-                                'raw_obs': {
-                                    'raised': cumulative_raised.copy(),
-                                    'big_blind': big_blind,
-                                    'pot': calculate_pot(cumulative_raised.copy(), big_blind, dealer_id, 0),  # Use stage 0 for bet calculation
-                                    'stage': 0
-                                }
-                            }
-                            bet_amount = self._get_bet_amount(action_int, env, action_player_id, temp_state)
-
-                            # Update cumulative raised array based on action
-                            if action_int in [2, 3]:  # Raise actions
-                                opponent_id = 1 - action_player_id
-                                opponent_raised = cumulative_raised[opponent_id]
-                                if bet_amount < opponent_raised:
-                                    cumulative_raised[action_player_id] = opponent_raised + big_blind
-                                else:
-                                    cumulative_raised[action_player_id] = bet_amount
-                            elif action_int == 1:  # Call/Check
-                                opponent_id = 1 - action_player_id
-                                if cumulative_raised[opponent_id] > cumulative_raised[action_player_id]:
-                                    cumulative_raised[action_player_id] = cumulative_raised[opponent_id]
-
-                    # Use cumulative raised array for postflop pot calculation
-                    raised = cumulative_raised
-                except Exception as e:
-                    pass
-            else:
-                raised = raw_obs.get('raised', [0, 0])
         
         # Calculate pot accurately using centralized pot calculator with reconstructed raised array
         # Create a modified raw_obs with the reconstructed raised array
@@ -564,7 +525,8 @@ class GameManager:
             'dealer_id': dealer_id,
             'raised': raised,
             'in_chips': in_chips,  # Total chips each player has put in this hand
-            'action_history': self._build_action_history(env, state, session_id),
+            'action_history': self._build_action_history(env, state, session_id),  # Legacy format
+            'hand_events': [event.to_dict() for event in game.get('hand_events', [])],  # New event-based format
             'payoffs': env.get_payoffs() if env.is_over() else None,
             'opponent_hand': self._get_opponent_hand(env) if env.is_over() else None
         }
@@ -605,312 +567,324 @@ class GameManager:
         return game_state
     
     def _build_action_history(self, env, state, session_id):
-        """Build action history from environment, including community card deals and blinds"""
+        """Build action history - SIMPLIFIED for native RLCard integration"""
         game = self.games.get(session_id, {})
-        
-        # Initialize cumulative history if not exists
+
+        # Initialize history if not exists
         if 'action_history_with_cards' not in game:
             game['action_history_with_cards'] = []
-            game['last_action_count'] = 0
-            game['blinds_added'] = False
-            game['last_processed_stage'] = 0  # Track last processed stage to detect transitions
-        
+
         try:
-            # Get current stage and public cards
-            raw_obs = state.get('raw_obs', {})
-            current_stage = raw_obs.get('stage', 0)
-            if hasattr(current_stage, 'value'):
-                current_stage = current_stage.value
-            elif not isinstance(current_stage, int):
-                current_stage = int(current_stage) if current_stage else 0
-            
-            public_cards = raw_obs.get('public_cards', [])
-            current_public_cards_count = len(public_cards)
-            
-            # Get previous state from game storage
-            last_stage = game.get('last_stage', 0)
-            last_public_cards_count = game.get('last_public_cards_count', 0)
-            
-            # FIRST: Check if blinds need to be added (at start of preflop, before any actions)
-            if not game.get('blinds_added', False) and current_stage == 0:
-                # Get blind information
-                big_blind = raw_obs.get('big_blind', 2)
-                small_blind = big_blind // 2
-                
-                # Get dealer_id to determine who posted which blind
-                dealer_id = None
-                if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                    dealer_id = env.game.dealer_id
-                
-                # Try to get player in_chips directly from game object (more reliable)
-                player_in_chips = None
-                if hasattr(env, 'game') and hasattr(env.game, 'players'):
-                    try:
-                        player_in_chips = [p.in_chips for p in env.game.players]
-                    except:
-                        pass
-                
-                # Fallback to raised array if player_in_chips not available
-                if player_in_chips is None:
-                    player_in_chips = raw_obs.get('raised', [0, 0])
-                
-                # In heads-up: small blind = (dealer + 1) % 2, big blind = (dealer + 2) % 2 = dealer
-                if dealer_id is not None and len(player_in_chips) >= 2:
-                    small_blind_player = (dealer_id + 1) % 2
-                    big_blind_player = (dealer_id + 2) % 2  # In 2-player, this wraps to dealer_id
-                    
-                    # Check if blinds have actually been posted
-                    # Check both small blind and big blind amounts
-                    small_blind_posted = player_in_chips[small_blind_player] >= small_blind - 0.5
-                    big_blind_posted = player_in_chips[big_blind_player] >= big_blind - 0.5
-                    
-                    if small_blind_posted and big_blind_posted:
-                        # Add small blind entry
-                        game['action_history_with_cards'].append({
-                            'type': 'blind',
-                            'blind_type': 'small',
-                            'player_id': small_blind_player,
-                            'player_name': 'You' if small_blind_player == 0 else 'Opponent',
-                            'amount': small_blind
-                        })
-                        
-                        # Add big blind entry
-                        game['action_history_with_cards'].append({
-                            'type': 'blind',
-                            'blind_type': 'big',
-                            'player_id': big_blind_player,
-                            'player_name': 'You' if big_blind_player == 0 else 'Opponent',
-                            'amount': big_blind
-                        })
-                        
-                        # Log blinds posted
-                        logger.info(f"💰 Blinds posted - Session: {session_id}, SB: {small_blind} (P{small_blind_player}), BB: {big_blind} (P{big_blind_player}), Dealer: {dealer_id}")
-                        
-                        game['blinds_added'] = True
-            
-            # SECOND: Process all actions from action_recorder FIRST (before community cards)
-            # This ensures actions appear in correct chronological order
-            current_action_count = 0
-            if hasattr(env, 'action_recorder') and env.action_recorder:
-                current_action_count = len(env.action_recorder)
-                
-                # Add new actions to cumulative history
-                last_action_count = game.get('last_action_count', 0)
-                if current_action_count > last_action_count:
-                    # Get the stage when the last action was processed to detect stage transitions
-                    last_processed_stage = game.get('last_processed_stage', current_stage)
-                    
-                    for i in range(last_action_count, current_action_count):
-                        action_record = env.action_recorder[i]
-                        if len(action_record) >= 2:
-                            player_id, action = action_record[0], action_record[1]
-                            
-                            # CRITICAL FIX: Skip actions that appear to be automatic/internal RLCard actions
-                            # These can occur during stage transitions (preflop -> postflop) when RLCard
-                            # automatically processes state changes. We only want to record actions that
-                            # were actually initiated by the user or AI through our process_action/process_ai_turn methods.
-                            
-                            # Get current player from game state to validate actions
-                            current_player = game.get('current_player', None)
-                            
-                            # Check if this action is for player 0 (human) and if we're in a stage transition
-                            # If we just transitioned to postflop and this is player 0's action, it might be
-                            # an automatic action that shouldn't be recorded
-                            # NOTE: Disabled automatic action skip logic as it was incorrectly skipping legitimate preflop actions
-                            # when stage transitions occurred. This was causing preflop actions to not appear in action history
-                            # until after flop cards were dealt.
-                            # if player_id == 0 and last_processed_stage == 0 and current_stage > 0:
-                            #     # We just transitioned from preflop to postflop
-                            #     # Check if this action is a CHECK_CALL that might be automatic
-                            #     action_value = action.value if hasattr(action, 'value') else action
-                            #     if action_value == 1:  # CHECK_CALL
-                            #         # This might be an automatic action - check if it's actually valid
-                            #         # by verifying the current player state
-                            #         # In heads-up postflop, BB (dealer) acts first. If we just transitioned to postflop
-                            #         # and current_player is not 0, then player 0 shouldn't have acted yet
-                            #         if current_player is not None and current_player != player_id:
-                            #             # The current player doesn't match - this action might be stale/automatic
-                            #             # This happens when RLCard records an internal state transition as an action
-                            #             logger.warning(f"⚠️ [ACTION_HISTORY] Skipping potentially automatic action for P{player_id} during stage transition - Current player: {current_player}, Action: {action}, Stage: {current_stage}")
-                            #             continue
-                            
-                            # Reconstruct the state BEFORE this action was taken
-                            # This ensures action labels are correct based on the context at that time
-                            state_before_action = self._reconstruct_state_before_action(
-                                env, state, env.action_recorder[:i], i
-                            )
-                            # Reconstruct the state AFTER this action to get actual bet amount
-                            state_after_action = self._reconstruct_state_after_action(
-                                env, state, env.action_recorder[:i+1], i+1
-                            )
-                            
-                            # CRITICAL FIX: Get the stage when this action actually occurred, not the current stage
-                            # The current_stage might be from a later betting round (e.g., Turn) when we're
-                            # building history for a Flop action
-                            action_stage = current_stage  # Default to current stage
-                            if state_before_action and 'raw_obs' in state_before_action:
-                                action_stage_raw = state_before_action['raw_obs'].get('stage', current_stage)
-                                if hasattr(action_stage_raw, 'value'):
-                                    action_stage = action_stage_raw.value
-                                elif isinstance(action_stage_raw, int):
-                                    action_stage = action_stage_raw
-                                elif action_stage_raw:
-                                    try:
-                                        action_stage = int(action_stage_raw)
-                                    except:
-                                        action_stage = current_stage
-                            
-                            # CRITICAL FIX: Calculate bet amount appropriately based on action type
-                            # For raises: use total amount raised TO (ActionLabeling expects this)
-                            # For calls: use the difference (amount to call)
-                            # For checks: use 0
-                            action_value_for_check = action.value if hasattr(action, 'value') else (action if isinstance(action, int) else 1)
-                            bet_amount = 0
-                            if state_before_action and state_after_action:
-                                before_obs = state_before_action.get('raw_obs', {})
-                                after_obs = state_after_action.get('raw_obs', {})
-                                before_raised = before_obs.get('raised', [0, 0])
-                                after_raised = after_obs.get('raised', [0, 0])
+            # SIMPLIFIED: With native RLCard, use the hand_history_storage directly
+            # The _track_decision method now maintains accurate history
+            history = []  # Initialize history to avoid scoping issues
 
-                                logger.debug(f"🎯 [ACTION_HISTORY] State reconstruction for P{player_id} action {action_value_for_check}: before_raised={before_raised}, after_raised={after_raised}")
+            # Add blind entries at the beginning if they were added before
+            if game.get('blinds_added', False):
+                self._add_blind_entries(history, env, session_id)
 
-                                if player_id is not None and player_id < len(before_raised) and player_id < len(after_raised):
-                                    before_amount = before_raised[player_id]
-                                    after_amount = after_raised[player_id]
+            if session_id in hand_history_storage:
+                # Convert decision records to action history format
+                for decision in hand_history_storage[session_id]:
+                    bet_amount = decision.get('bet_amount', None)
+                    action_entry = {
+                        'type': 'action',
+                        'player_id': decision['player_id'],
+                        'player_name': 'You' if decision['player_id'] == 0 else 'Opponent',
+                        'action': self._action_to_string(decision['action'], env, state, decision['player_id'], bet_amount),
+                        'stage': decision['stage'],
+                        'pot': decision['pot'],
+                        'hand': decision.get('hand', []),
+                        'public_cards': decision.get('public_cards', [])
+                    }
+                    history.append(action_entry)
 
-                                    # For raise actions (2, 3) and all-in (4), use total amount raised TO
-                                    # ActionLabeling._get_raise_label expects the total amount raised TO, not the additional amount
-                                    if action_value_for_check in [2, 3, 4]:
-                                        bet_amount = after_amount  # Total amount raised TO
-                                    else:
-                                        # For call/check (1) or fold (0), use the difference
-                                        bet_amount = after_amount - before_amount
-                            
-                            # If bet_amount calculation failed, try fallback methods
-                            if bet_amount == 0 and action_value_for_check == 1:  # Check/Call action
-                                # For Check/Call, try to determine if it's a call by checking if facing a bet
-                                if state_before_action and 'raw_obs' in state_before_action:
-                                    before_obs = state_before_action['raw_obs']
-                                    before_raised = before_obs.get('raised', [0, 0])
-                                    if player_id is not None and len(before_raised) > 1 - player_id:
-                                        player_raised_before = before_raised[player_id] if player_id < len(before_raised) else 0
-                                        opponent_raised_before = before_raised[1 - player_id] if len(before_raised) > 1 - player_id else 0
-                                        epsilon = 0.01
-                                        # If opponent raised more than player, this is a call
-                                        if abs(opponent_raised_before - player_raised_before) > epsilon:
-                                            # Calculate call amount using in_chips difference for more accuracy
-                                            # Try to get in_chips from the environment (most reliable)
-                                            player_in_chips_before = 0
-                                            player_in_chips_after = 0
+                # Add community card deals at appropriate times
+                self._add_community_card_entries(history, state)
 
-                                            # Get in_chips from env if available
-                                            if env is not None and hasattr(env, 'game') and hasattr(env.game, 'players'):
-                                                try:
-                                                    players = env.game.players
-                                                    if player_id < len(players):
-                                                        # Get in_chips before the action (from state_before_action)
-                                                        if 'in_chips' in state_before_action:
-                                                            in_chips_before = state_before_action['in_chips']
-                                                            if isinstance(in_chips_before, (list, tuple)) and player_id < len(in_chips_before):
-                                                                player_in_chips_before = in_chips_before[player_id]
+            # Update game history regardless of whether we have decisions or not
+            game['action_history_with_cards'] = history
 
-                                                        # Get in_chips after the action (from current env state)
-                                                        player_in_chips_after = players[player_id].in_chips
-
-                                                        # The call amount is the difference in player's in_chips
-                                                        if player_in_chips_after > player_in_chips_before:
-                                                            bet_amount = player_in_chips_after - player_in_chips_before
-                                                except Exception as e:
-                                                    logger.debug(f"Failed to get in_chips for call amount calculation: {e}")
-
-                                            # Fallback to raised array difference if in_chips method failed
-                                            if bet_amount == 0:
-                                                bet_amount = opponent_raised_before - player_raised_before
-
-                            logger.debug(f"🎯 [ACTION_HISTORY] Initial bet_amount calculation for P{player_id} action {action_value_for_check}: before_raised={before_raised}, after_raised={after_raised}, bet_amount={bet_amount}")
-
-                            # CRITICAL FIX: For Check/Call actions, don't use fallback methods if bet_amount is 0
-                            # bet_amount = 0 correctly indicates a Check, not a failed calculation
-                            if action_value_for_check == 1 and bet_amount == 0:
-                                logger.debug(f"🎯 [ACTION_HISTORY] Check action detected for P{player_id}: bet_amount={bet_amount}, preserving as Check")
-                            elif bet_amount == 0 and action_value_for_check != 1:
-                                # Only use fallbacks for non-Check/Call actions (raises, folds, all-ins)
-                                bet_amount = self._get_bet_amount_from_state(action, env, player_id, state_after_action)
-                                # If still 0, try calculating directly
-                                if bet_amount == 0:
-                                    temp_state_before = state_before_action
-                                    bet_amount = self._get_bet_amount(action, env, player_id, temp_state_before)
-
-                            logger.debug(f"🎯 [ACTION_HISTORY] Final bet_amount for P{player_id}: {bet_amount}")
-                            
-                            # Format action name, using bet_amount to help determine correct label
-                            # IMPORTANT: Use state_before_action to get correct Check vs Call label
-                            # CRITICAL FIX: For AI actions (player_id == 1), use the current game state
-                            # instead of reconstructed state_before_action to ensure AI actions are
-                            # properly labeled based on facing player bets (e.g., 4-bet vs 3-bet)
-                            context_state = state_before_action
-                            if player_id == 1:  # AI opponent
-                                # For AI actions, use current state which includes player's action
-                                # that AI is responding to. This ensures correct labeling like "4-bet to 15BB"
-                                # instead of "3-bet to 10BB" when facing a player 3-bet
-                                context_state = state
-                                logger.debug(f"Using current game state for AI action context (player {player_id})")
-
-                            action_name = self._format_action_with_context(
-                                action, env, context_state, player_id, env.action_recorder[:i], bet_amount
-                            )
-                            player_name = 'You' if player_id == 0 else 'Opponent'
-                            game['action_history_with_cards'].append({
-                                'type': 'action',
-                                'player_id': player_id,
-                                'player_name': player_name,
-                                'action': action_name,
-                                'bet_amount': bet_amount
-                            })
-
-                            # Log action added to history - use the stage when action occurred, not current stage
-                            logger.info(f"🎯 Action added - Session: {session_id}, P{player_id} ({player_name}), {action_name}, Bet: {bet_amount}, Stage: {action_stage} (action occurred at stage {action_stage}, current stage: {current_stage})")
-                
-                game['last_action_count'] = current_action_count
-                game['last_processed_stage'] = current_stage  # Track stage for next iteration
-            
-            # THIRD: Check if community cards were dealt (AFTER processing actions)
-            # This ensures community cards appear after all actions in the previous street
-            if current_public_cards_count > last_public_cards_count:
-                # Determine which cards were just dealt
-                new_cards = public_cards[last_public_cards_count:]
-                
-                # Determine stage name
-                stage_name = 'Preflop'
-                if current_stage == 1:
-                    stage_name = 'Flop'
-                elif current_stage == 2:
-                    stage_name = 'Turn'
-                elif current_stage == 3:
-                    stage_name = 'River'
-                
-                # Add community card entry to cumulative history
-                game['action_history_with_cards'].append({
-                    'type': 'community_cards',
-                    'stage': stage_name,
-                    'cards': new_cards,
-                    'all_cards': public_cards.copy()  # Include all cards for display
-                })
-                
-                # Log community cards dealt
-                logger.info(f"🃏 Cards dealt - Session: {session_id}, {stage_name}, New: {new_cards}, Total: {len(public_cards)}")
-            
-            # Update stored state
-            game['last_stage'] = current_stage
-            game['last_public_cards_count'] = current_public_cards_count
-            
-            # Return the cumulative history
             return game['action_history_with_cards'].copy()
+
+        except Exception as e:
+            logger.warning(f"Error building action history for session {session_id}: {str(e)}")
+            logger.exception(f"📋 [ACTION_HISTORY] Exception details: {e}")
+            return game.get('action_history_with_cards', []).copy()
+
+    def _add_blind_entries(self, history, env, session_id):
+        """Add small blind and big blind entries to action history"""
+        try:
+            # Get dealer position to determine SB/BB
+            dealer_id = None
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+
+            if dealer_id is None:
+                logger.warning(f"📋 [BLINDS] Could not determine dealer_id for session {session_id}")
+                return
+
+            # In heads-up poker: dealer is BB, non-dealer is SB
+            sb_player_id = 1 - dealer_id  # Non-dealer is SB
+            bb_player_id = dealer_id       # Dealer is BB
+
+            # Get blind amounts
+            big_blind = 2  # Default
+            small_blind = 1  # Default
+            if hasattr(env, 'game') and hasattr(env.game, 'big_blind'):
+                big_blind = env.game.big_blind
+                small_blind = big_blind // 2
+
+            # Add small blind entry
+            sb_entry = {
+                'type': 'blind',
+                'player_id': sb_player_id,
+                'player_name': 'You' if sb_player_id == 0 else 'Opponent',
+                'blind_type': 'small',
+                'amount': small_blind,
+                'stage': 0,  # Preflop
+                'pot': small_blind,
+                'hand': [],
+                'public_cards': []
+            }
+            history.append(sb_entry)
+
+            # Add big blind entry
+            bb_entry = {
+                'type': 'blind',
+                'player_id': bb_player_id,
+                'player_name': 'You' if bb_player_id == 0 else 'Opponent',
+                'blind_type': 'big',
+                'amount': big_blind,
+                'stage': 0,  # Preflop
+                'pot': small_blind + big_blind,
+                'hand': [],
+                'public_cards': []
+            }
+            history.append(bb_entry)
+
+        except Exception as e:
+            logger.warning(f"📋 [BLINDS] Error adding blind entries for session {session_id}: {str(e)}")
+
+    def _add_community_card_entries(self, history, state):
+        """Add community card deal entries to history"""
+        raw_obs = state.get('raw_obs', {})
+        stage = raw_obs.get('stage', 0)
+        public_cards = raw_obs.get('public_cards', [])
+
+        if hasattr(stage, 'value'):
+            stage = stage.value
+
+        # Add flop deal
+        if stage >= 1 and len(public_cards) >= 3:
+            history.insert(0, {
+                'type': 'community_cards',
+                'stage': 'Flop',
+                'all_cards': public_cards[:3]
+            })
+
+        # Add turn deal
+        if stage >= 2 and len(public_cards) >= 4:
+            history.insert(0, {
+                'type': 'community_cards',
+                'stage': 'Turn',
+                'all_cards': [public_cards[3]]
+            })
+
+        # Add river deal
+        if stage >= 3 and len(public_cards) >= 5:
+            history.insert(0, {
+                'type': 'community_cards',
+                'stage': 'River',
+                'all_cards': [public_cards[4]]
+            })
+    
+    def _emit_blind_events(self, session_id, env):
+        """Emit blind posting events immediately after game initialization"""
+        try:
+            if session_id not in self.games:
+                return
+            
+            game = self.games[session_id]
+            if 'hand_events' not in game:
+                game['hand_events'] = []
+            
+            # Get dealer position to determine SB/BB
+            dealer_id = None
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+            
+            if dealer_id is None:
+                logger.warning(f"📋 [BLINDS] Could not determine dealer_id for session {session_id}")
+                return
+            
+            # In heads-up poker: dealer is BB, non-dealer is SB
+            sb_player_id = 1 - dealer_id  # Non-dealer is SB
+            bb_player_id = dealer_id       # Dealer is BB
+            
+            # Get blind amounts
+            big_blind = 2  # Default
+            small_blind = 1  # Default
+            if hasattr(env, 'game') and hasattr(env.game, 'big_blind'):
+                big_blind = env.game.big_blind
+                small_blind = big_blind // 2
+            
+            # Get initial pot (should be 0 before blinds)
+            initial_pot = 0
+            
+            # Emit small blind event
+            sb_event = HandEvent(
+                stage='preflop',
+                kind='blind',
+                player_idx=sb_player_id,
+                amount=small_blind,
+                pot=small_blind,
+                label='Post SB'
+            )
+            game['hand_events'].append(sb_event)
+            
+            # Emit big blind event
+            bb_event = HandEvent(
+                stage='preflop',
+                kind='blind',
+                player_idx=bb_player_id,
+                amount=big_blind,
+                pot=small_blind + big_blind,
+                label='Post BB'
+            )
+            game['hand_events'].append(bb_event)
+            
+            # Mark blinds as added
+            game['blinds_added'] = True
             
         except Exception as e:
-            # If we can't build action history, return what we have
-            print(f"Warning: Could not build action history: {e}")
-            return game.get('action_history_with_cards', []).copy()
+            logger.warning(f"📋 [BLINDS] Error emitting blind events for session {session_id}: {str(e)}")
+    
+    def _emit_action_event(self, session_id, player_id, action_value, state, next_state, bet_amount=None):
+        """Emit an action event when a player takes an action"""
+        try:
+            if session_id not in self.games:
+                return
+            
+            game = self.games[session_id]
+            if 'hand_events' not in game:
+                game['hand_events'] = []
+            
+            env = game.get('env')
+            if not env:
+                return
+            
+            # Get stage
+            raw_obs = state.get('raw_obs', {})
+            stage = raw_obs.get('stage', 0)
+            if hasattr(stage, 'value'):
+                stage = stage.value
+            elif not isinstance(stage, int):
+                stage = int(stage) if stage else 0
+            
+            stage_names = {0: 'preflop', 1: 'flop', 2: 'turn', 3: 'river'}
+            stage_name = stage_names.get(stage, 'preflop')
+            
+            # Get pot after action
+            next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
+            pot = next_raw_obs.get('pot', raw_obs.get('pot', 0))
+            pot = float(pot) if pot else 0.0
+            
+            # Get context for action labeling
+            game_state = {'raw_obs': raw_obs}
+            context = ActionLabeling.get_context_from_state(game_state, player_id, env)
+            
+            # Generate action label
+            label = ActionLabeling.get_action_label(action_value, context, bet_amount)
+            
+            # Create and emit event
+            event = HandEvent(
+                stage=stage_name,
+                kind='action',
+                player_idx=player_id,
+                amount=bet_amount if bet_amount else None,
+                pot=pot,
+                label=label,
+                action_value=action_value,
+                bet_amount=bet_amount
+            )
+            game['hand_events'].append(event)
+            
+        except Exception as e:
+            logger.warning(f"📋 [ACTION_EVENT] Error emitting action event for session {session_id}: {str(e)}")
+    
+    def _emit_community_card_event(self, session_id, stage_name, cards, pot):
+        """Emit a community card event when flop/turn/river are dealt"""
+        try:
+            if session_id not in self.games:
+                return
+            
+            game = self.games[session_id]
+            if 'hand_events' not in game:
+                game['hand_events'] = []
+            
+            # Convert cards to string format
+            card_strings = []
+            for card in cards:
+                if isinstance(card, str):
+                    card_strings.append(card)
+                else:
+                    # Convert card index to string format
+                    try:
+                        from rlcard.games.base import Card
+                        if isinstance(card, Card):
+                            card_index = card.get_index()
+                        else:
+                            card_index = int(card)
+                        
+                        if 0 <= card_index <= 51:
+                            suits = ['S', 'H', 'D', 'C']
+                            ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+                            suit_idx = card_index // 13
+                            rank_idx = card_index % 13
+                            card_strings.append(suits[suit_idx] + ranks[rank_idx])
+                        else:
+                            card_strings.append(str(card))
+                    except:
+                        card_strings.append(str(card))
+            
+            # Create and emit event
+            event = HandEvent(
+                stage=stage_name.lower(),
+                kind='community',
+                player_idx=None,
+                pot=pot,
+                cards=card_strings,
+                label=stage_name
+            )
+            game['hand_events'].append(event)
+            
+        except Exception as e:
+            logger.warning(f"📋 [COMMUNITY_CARDS] Error emitting community card event for session {session_id}: {str(e)}")
+    
+    def _emit_win_event(self, session_id, winner_id, amount):
+        """Emit a win event when hand concludes"""
+        try:
+            if session_id not in self.games:
+                return
+            
+            game = self.games[session_id]
+            if 'hand_events' not in game:
+                game['hand_events'] = []
+            
+            # Create and emit event
+            event = HandEvent(
+                stage='showdown',
+                kind='win',
+                player_idx=winner_id,
+                amount=amount,
+                pot=0.0,  # Pot is distributed, so 0 remaining
+                label=f'Wins {amount:.1f} BB' if amount else 'Wins'
+            )
+            game['hand_events'].append(event)
+            
+        except Exception as e:
+            logger.warning(f"📋 [WIN_EVENT] Error emitting win event for session {session_id}: {str(e)}")
     
     def _format_action(self, action, env, state=None, player_id=None):
         """Format action for display"""
@@ -1173,80 +1147,10 @@ class GameManager:
         return self._get_bet_amount(action, env, player_id, state)
     
     def _format_action_with_context(self, action, env, state=None, player_id=None, previous_actions=None, bet_amount=None):
-        """Format action for display with context from previous actions"""
-        # Check if this is a Check/Call action (action_value == 1)
-        action_value = action
-        if hasattr(action, 'value'):
-            action_value = action.value
-        elif not isinstance(action, int):
-            try:
-                action_value = int(action)
-            except:
-                pass
-        
-        # Only need special handling for Check/Call actions in specific cases
-        # Don't override the reconstructed state if it already correctly shows the current betting round state
-        if action_value == 1 and state and 'raw_obs' in state:
-            raw_obs = state['raw_obs']
-            current_raised = raw_obs.get('raised', [0, 0])
-            player_raised = current_raised[player_id] if player_id is not None and player_id < len(current_raised) else 0
-            opponent_raised = current_raised[1 - player_id] if player_id is not None and len(current_raised) > 1 - player_id else 0
-
-            # If the reconstructed state already shows opponent_raised > player_raised, use it as-is
-            # Only apply special logic if the reconstructed state shows equal raised amounts but we know opponent raised recently
-            if abs(opponent_raised - player_raised) <= 0.01 and previous_actions is not None and len(previous_actions) > 0:
-                # Check if opponent raised in the SAME betting round (not across betting rounds)
-                # This is only needed when state reconstruction doesn't properly reflect the current betting round
-                opponent_raised_same_round = False
-                stage = raw_obs.get('stage', 0)
-                if hasattr(stage, 'value'):
-                    stage = stage.value
-                elif not isinstance(stage, int):
-                    stage = int(stage) if stage else 0
-
-                # For postflop, if raised is [0,0], it means no one raised in this betting round
-                # Don't override based on previous betting rounds
-                if stage == 0:  # Only check previous actions for preflop
-                    for i in range(len(previous_actions) - 1, -1, -1):
-                        prev_action_record = previous_actions[i]
-                        if len(prev_action_record) >= 2:
-                            prev_player_id, prev_action = prev_action_record[0], prev_action_record[1]
-                            if prev_player_id == 1 - player_id:  # Opponent's action
-                                # Get action value
-                                if hasattr(prev_action, 'value'):
-                                    prev_action_value = prev_action.value
-                                elif isinstance(prev_action, int):
-                                    prev_action_value = prev_action
-                                else:
-                                    try:
-                                        prev_action_value = int(prev_action)
-                                    except:
-                                        continue
-                                # If opponent raised (action 2 or 3), player is facing a bet
-                                if prev_action_value in [2, 3]:  # Raise actions
-                                    opponent_raised_same_round = True
-                                # Stop at the most recent opponent action
-                                break
-
-                    # If opponent raised in same round, create modified state to indicate player is facing a bet
-                    if opponent_raised_same_round:
-                        modified_state = state.copy()
-                        if 'raw_obs' not in modified_state:
-                            modified_state['raw_obs'] = {}
-                        elif not isinstance(modified_state['raw_obs'], dict):
-                            modified_state['raw_obs'] = dict(modified_state['raw_obs'])
-                        else:
-                            modified_state['raw_obs'] = modified_state['raw_obs'].copy()
-
-                        # Ensure opponent_raised > player_raised to trigger "Call"
-                        modified_state['raw_obs']['raised'] = current_raised.copy()
-                        modified_state['raw_obs']['raised'][1 - player_id] = player_raised + 1
-
-                        return self._action_to_string(action, env, modified_state, player_id, bet_amount)
-        
-        # Fall back to regular formatting
-        result = self._action_to_string(action, env, state, player_id, bet_amount)
-        return result
+        """Format action for display - SIMPLIFIED for native RLCard integration"""
+        # SIMPLIFIED: With native RLCard state, no complex reconstruction needed
+        # The state should now be consistent and accurate
+        return self._action_to_string(action, env, state, player_id, bet_amount)
     
     def _action_to_string(self, action, env=None, state=None, player_id=None, bet_amount=None):
         """Convert action value to display string using shared ActionLabeling module"""
@@ -1296,7 +1200,32 @@ class GameManager:
                 action_value = int(action)
             except (ValueError, TypeError):
                 return 0
-        
+
+        # For tracking decisions, state should be next_state (after action)
+        # Try to get the actual bet amount by comparing in_chips before/after action
+        if state and 'raw_obs' in state and player_id is not None:
+            raw_obs = state['raw_obs']
+
+            # Try to get in_chips from the state (after action)
+            in_chips = None
+            if hasattr(state, 'get') and 'in_chips' in state:
+                in_chips = state.get('in_chips', [0, 0])
+            elif 'raw_obs' in state and 'in_chips' in state['raw_obs']:
+                in_chips = state['raw_obs'].get('in_chips', [0, 0])
+
+            # If we have in_chips, we can calculate the bet amount
+            if in_chips and len(in_chips) > player_id:
+                bet_amount = in_chips[player_id]
+                return bet_amount
+
+            # Fallback: try raised array (though RLCard doesn't maintain it properly)
+            raised = raw_obs.get('raised', [0, 0])
+            if player_id < len(raised) and raised[player_id] > 0:
+                bet_amount = raised[player_id]
+                return bet_amount
+
+        # Fallback: predict bet amount for action planning (when we don't have next_state yet)
+
         # Handle All-In action (action_value == 4)
         if action_value == 4:
             # For all-in, get the amount the player bet
@@ -1706,25 +1635,7 @@ class GameManager:
             # RLCard environment doesn't have get_legal_actions() method, skip the re-check
             logger.info(f"🔍 [PROCESS_ACTION] Skipping legal actions re-check (RLCard doesn't support it)")
 
-        # CRITICAL: Capture the player's hand BEFORE the action is processed
-        # This ensures we record the correct hand for the player who is acting
-        player_hand_before_action = []
-        try:
-            if hasattr(env, 'game') and hasattr(env.game, 'players') and current_player < len(env.game.players):
-                player_obj = env.game.players[current_player]
-                if hasattr(player_obj, 'hand'):
-                    raw_hand = player_obj.hand if player_obj.hand else []
-                    # Convert Card objects to strings for consistency
-                    try:
-                        from rlcard.games.base import Card
-                        if raw_hand and isinstance(raw_hand[0], Card):
-                            player_hand_before_action = [str(card) for card in raw_hand]
-                        else:
-                            player_hand_before_action = [str(c) for c in raw_hand] if raw_hand else []
-                    except:
-                        player_hand_before_action = [str(c) for c in raw_hand] if raw_hand else []
-        except Exception as e:
-            logger.warning(f"⚠️ [PROCESS_ACTION] Failed to capture hand: {e}")
+        # SIMPLIFIED: Hand capture no longer needed - _track_decision gets it from RLCard state directly
 
         # Set action in human agent
         human_agent.set_action(action)
@@ -1747,73 +1658,16 @@ class GameManager:
                     logger.error(f"❌ [PROCESS_ACTION] Failed to get game state as fallback: {fallback_error}")
                     return None
 
-            # Fix for HUNL action order: BB (dealer) acts first postflop, then SB
-            # Get previous stage from current state
-            raw_obs = state.get('raw_obs', {})
-            prev_stage = raw_obs.get('stage', 0)
-            if hasattr(prev_stage, 'value'):
-                prev_stage = prev_stage.value
-            elif not isinstance(prev_stage, int):
-                prev_stage = int(prev_stage) if prev_stage else 0
-            
-            # Get new stage from next state
-            next_raw_obs = next_state.get('raw_obs', {})
-            next_stage = next_raw_obs.get('stage', 0)
-            if hasattr(next_stage, 'value'):
-                next_stage = next_stage.value
-            elif not isinstance(next_stage, int):
-                next_stage = int(next_stage) if next_stage else 0
-            
-            # Get dealer_id to determine positions (dealer = BB in HUNL, non-dealer = SB/button)
-            dealer_id = None
-            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                dealer_id = env.game.dealer_id
-            
-            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB (dealer) should act first
-            if prev_stage == 0 and next_stage > 0:
-                if dealer_id is not None:
-                    # BB (dealer) should act first postflop
-                    bb_player = dealer_id
-                    next_player_id = bb_player
-            
-            # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
-            # In heads-up postflop: BB (dealer) acts first, then SB
-            elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
-                if dealer_id is not None:
-                    # BB (dealer) acts first, SB (button/non-dealer) acts second
-                    bb_player = dealer_id
-                    sb_player = (dealer_id + 1) % 2
+            # REMOVED: BB-first action order override logic (60+ lines)
+            # This functionality is now handled natively by the modified RLCard fork
+            # The fork implements BB-first postflop action order directly in the game engine
 
-                    # If BB just acted, next should be SB (if there's a bet) or end betting round
-                    if current_player == bb_player:
-                        # Check if there's a bet (raised amounts differ)
-                        raised = next_raw_obs.get('raised', [0, 0])
-                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
-                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
-                        epsilon = 0.01
-
-                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
-                        if abs(bb_raised - sb_raised) > epsilon:
-                            next_player_id = sb_player
-                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-                        # Don't override in this case - let RLCard determine if betting round ends
-                    else:
-                        # Check if there's a bet (raised amounts differ)
-                        raised = next_raw_obs.get('raised', [0, 0])
-                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
-                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
-                        epsilon = 0.01
-                        
-                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
-                        if abs(bb_raised - sb_raised) > epsilon:
-                            next_player_id = sb_player
-                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-
-            # Update game state
+            # Update game state - use RLCard's natural next_player_id
             game['current_state'] = next_state
             game['current_player'] = next_player_id
             
-            # Get updated state info for logging (next_raw_obs already defined above)
+            # Get updated state info for logging
+            next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
             next_pot = next_raw_obs.get('pot', 0)
             next_public_cards = next_raw_obs.get('public_cards', [])
             next_raised = next_raw_obs.get('raised', [0, 0])
@@ -1822,16 +1676,36 @@ class GameManager:
             logger.info(f"✅ Action processed - Session: {session_id}, Next: P{next_player_id}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
 
             # Track decision for hand history
-            # CRITICAL: Use current_player (the player who just acted) for decision tracking
-            # This is correct even if next_player_id was overridden for postflop action order
-            logger.debug(f"📊 [PROCESS_ACTION] Tracking decision - Player: {current_player}, Action: {action}, Stage: {prev_stage} → {next_stage}")
+            logger.debug(f"📊 [PROCESS_ACTION] Tracking decision - Player: {current_player}, Action: {action}")
 
-            # FIX: Update state's current_player to reflect the player who just acted
-            # This prevents fallback logic from detecting false mismatches during postflop action order overrides
+            # Update state's current_player to reflect the player who just acted
             state['raw_obs']['current_player'] = current_player
 
-            self._track_decision(session_id, current_player, action, state, next_state, player_hand_before_action)
+            # Calculate bet amount for event emission
+            bet_amount = None
+            try:
+                previous_pot = raw_obs.get('pot', 0)
+                current_pot = next_raw_obs.get('pot', 0)
+                pot_increase = current_pot - previous_pot
+                
+                if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
+                    bet_amount = current_pot
+                elif action_value == 1:  # Check/Call
+                    # Get call amount from raised array
+                    raised = next_raw_obs.get('raised', [0, 0])
+                    if current_player == 0:
+                        bet_amount = raised[0] if len(raised) > 0 else 0
+                    else:
+                        bet_amount = raised[1] if len(raised) > 1 else 0
+            except Exception:
+                bet_amount = None
+
+            # Emit action event
+            self._emit_action_event(session_id, current_player, action_value, state, next_state, bet_amount)
             
+            # Also track decision for legacy compatibility
+            self._track_decision(session_id, current_player, action, state, next_state)
+
             return self.get_game_state(session_id)
         except Exception as e:
             logger.error(f"❌ [PROCESS_ACTION] Error processing action for session {session_id}: {str(e)}")
@@ -1942,25 +1816,7 @@ class GameManager:
             public_cards = raw_obs.get('public_cards', [])
             raised = raw_obs.get('raised', [0, 0])
 
-            # CRITICAL: Capture the AI player's hand BEFORE the action is processed
-            ai_hand_before_action = []
-            try:
-                if hasattr(env, 'game') and hasattr(env.game, 'players') and current_player < len(env.game.players):
-                    ai_player_obj = env.game.players[current_player]
-                    if hasattr(ai_player_obj, 'hand'):
-                        raw_hand = ai_player_obj.hand if ai_player_obj.hand else []
-                        # Convert Card objects to strings for consistency
-                        try:
-                            from rlcard.games.base import Card
-                            if raw_hand and isinstance(raw_hand[0], Card):
-                                ai_hand_before_action = [str(card) for card in raw_hand]
-                            else:
-                                ai_hand_before_action = [str(c) for c in raw_hand] if raw_hand else []
-                        except:
-                            ai_hand_before_action = [str(c) for c in raw_hand] if raw_hand else []
-                        logger.info(f"🤖 [AI_TURN] Captured hand for AI P{current_player} before action: {ai_hand_before_action}")
-            except Exception as e:
-                logger.warning(f"⚠️ [AI_TURN] Failed to capture AI player hand before action: {e}")
+            # SIMPLIFIED: Hand capture no longer needed - _track_decision gets it from RLCard state directly
 
             # Process action - pass Action enum value when use_raw=True, action_index when use_raw=False
             # Note: RLCard's use_raw=True means "use Action enum directly", not "use indices"
@@ -1975,80 +1831,16 @@ class GameManager:
                 logger.error(f"Environment returned None state for AI turn in session {session_id}")
                 return None
             
-            # Fix for HUNL action order: BB (dealer) acts first postflop, then SB
-            # Get previous stage from current state
-            raw_obs = state.get('raw_obs', {})
-            prev_stage = raw_obs.get('stage', 0)
-            if hasattr(prev_stage, 'value'):
-                prev_stage = prev_stage.value
-            elif not isinstance(prev_stage, int):
-                prev_stage = int(prev_stage) if prev_stage else 0
-            
-            # Get new stage from next state
-            next_raw_obs = next_state.get('raw_obs', {})
-            next_stage = next_raw_obs.get('stage', 0)
-            if hasattr(next_stage, 'value'):
-                next_stage = next_stage.value
-            elif not isinstance(next_stage, int):
-                next_stage = int(next_stage) if next_stage else 0
-            
-            # Get dealer_id to determine positions (dealer = BB in HUNL, non-dealer = SB/button)
-            dealer_id = None
-            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                dealer_id = env.game.dealer_id
-            
-            # If we transitioned from preflop (stage 0) to postflop (stage > 0), BB (dealer) should act first
-            if prev_stage == 0 and next_stage > 0:
-                if dealer_id is not None:
-                    # BB (dealer) should act first postflop
-                    bb_player = dealer_id
-                    next_player_id = bb_player
-                    logger.info(f"🔄 [AI_TURN] Postflop transition detected - Overriding next_player to BB (dealer): {next_player_id}")
-            
-            # CRITICAL FIX: Within postflop betting rounds, ensure correct action order
-            # In heads-up postflop: BB (dealer) acts first, then SB
-            elif prev_stage > 0 and next_stage == prev_stage:  # Same stage = same betting round
-                if dealer_id is not None:
-                    # BB (dealer) acts first, SB (button/non-dealer) acts second
-                    bb_player = dealer_id
-                    sb_player = (dealer_id + 1) % 2
+            # REMOVED: BB-first action order override logic (70+ lines)
+            # This functionality is now handled natively by the modified RLCard fork
+            # The fork implements BB-first postflop action order directly in the game engine
 
-                    # If BB just acted, next should be SB (if there's a bet) or end betting round
-                    if current_player == bb_player:
-                        # Check if there's a bet (raised amounts differ)
-                        raised = next_raw_obs.get('raised', [0, 0])
-                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
-                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
-                        epsilon = 0.01
-
-                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
-                        if abs(bb_raised - sb_raised) > epsilon:
-                            next_player_id = sb_player
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
-                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-                        # Don't override in this case - let RLCard determine if betting round ends
-                        else:
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
-                    else:
-                        # Check if there's a bet (raised amounts differ)
-                        raised = next_raw_obs.get('raised', [0, 0])
-                        sb_raised = raised[sb_player] if len(raised) > sb_player else 0
-                        bb_raised = raised[bb_player] if len(raised) > bb_player else 0
-                        epsilon = 0.01
-                        
-                        # If raised amounts differ, BB must have bet/raised, so SB needs to act
-                        if abs(bb_raised - sb_raised) > epsilon:
-                            next_player_id = sb_player
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - BB (P{bb_player}) bet/raised (BB: {bb_raised}, SB: {sb_raised}), next is SB (P{sb_player})")
-                        # If raised amounts are equal and both checked, RLCard should handle ending the betting round
-                        else:
-                            logger.info(f"🔄 [AI_TURN] Postflop betting round - Both players checked (BB: {bb_raised}, SB: {sb_raised}), letting RLCard handle next state")
-            
-            # Update game state
+            # Update game state - use RLCard's natural next_player_id
             game['current_state'] = next_state
             game['current_player'] = next_player_id
             
-            # Get updated state info for logging (next_raw_obs already defined above)
+            # Get updated state info for logging
+            next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
             next_pot = next_raw_obs.get('pot', 0)
             next_public_cards = next_raw_obs.get('public_cards', [])
             next_raised = next_raw_obs.get('raised', [0, 0])
@@ -2057,268 +1849,141 @@ class GameManager:
             logger.info(f"🔄 AI action processed - Session: {session_id}, Next: P{next_player_id}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
 
             # Track decision for hand history
-            # CRITICAL: Use current_player (the player who just acted) for decision tracking
-            # This is correct even if next_player_id was overridden for postflop action order
-            logger.debug(f"📊 [AI_TURN] Tracking decision - Player: {current_player}, Action: {action}, Stage: {prev_stage} → {next_stage}")
+            logger.debug(f"📊 [AI_TURN] Tracking decision - Player: {current_player}, Action: {action}")
 
-            # FIX: Update state's current_player to reflect the player who just acted
-            # This prevents fallback logic from detecting false mismatches during postflop action order overrides
+            # Update state's current_player to reflect the player who just acted
             state['raw_obs']['current_player'] = current_player
 
-            self._track_decision(session_id, current_player, action, state, next_state, ai_hand_before_action)
+            # Calculate bet amount for event emission
+            bet_amount = None
+            try:
+                previous_pot = raw_obs.get('pot', 0)
+                current_pot = next_raw_obs.get('pot', 0)
+                pot_increase = current_pot - previous_pot
+                
+                if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
+                    bet_amount = current_pot
+                elif action_value == 1:  # Check/Call
+                    # Get call amount from raised array
+                    raised = next_raw_obs.get('raised', [0, 0])
+                    if current_player == 0:
+                        bet_amount = raised[0] if len(raised) > 0 else 0
+                    else:
+                        bet_amount = raised[1] if len(raised) > 1 else 0
+            except Exception:
+                bet_amount = None
+
+            # Emit action event
+            self._emit_action_event(session_id, current_player, action_value, state, next_state, bet_amount)
             
+            # Also track decision for legacy compatibility
+            self._track_decision(session_id, current_player, action, state, next_state)
+
             return self.get_game_state(session_id)
         except Exception as e:
             logger.error(f"Error processing AI turn for session {session_id}: {str(e)}")
             # Return current state on error to prevent game from breaking
             return self.get_game_state(session_id)
     
-    def _track_decision(self, session_id, player_id, action, state, next_state, player_hand=None):
-        """Track a decision for hand history"""
+    def _track_decision(self, session_id, player_id, action, state, next_state):
+        """Track a decision for hand history - SIMPLIFIED for native RLCard integration"""
         try:
             if session_id not in hand_history_storage:
                 hand_history_storage[session_id] = []
-            
-            # Get raw_obs safely
+
+            # SIMPLIFIED: Use native RLCard state directly (no complex reconstruction needed)
+            # Use next_state for pot and public cards (after the action), but state for other context
             raw_obs = state.get('raw_obs', {})
-            
-            # CRITICAL FIX: Use the correct stage based on when the action actually occurred
-            # For stage transitions (preflop → postflop), the action occurs on the NEW stage (flop/turn/river)
-            # not the old stage (preflop). Check if there's a stage transition and use next_state stage if so.
-            prev_stage = raw_obs.get('stage', 0)
-            if hasattr(prev_stage, 'value'):
-                prev_stage = prev_stage.value
-            elif not isinstance(prev_stage, int):
-                prev_stage = int(prev_stage) if prev_stage else 0
+            next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
 
-            # Check for stage transition using next_state
-            stage = prev_stage  # Default to previous stage
-            if next_state:
-                next_raw_obs = next_state.get('raw_obs', {})
-                next_stage = next_raw_obs.get('stage', prev_stage)
-                if hasattr(next_stage, 'value'):
-                    next_stage = next_stage.value
-                elif not isinstance(next_stage, int):
-                    next_stage = int(next_stage) if next_stage else prev_stage
-
-                # If stages differ, the action occurred on the new stage
-                if next_stage != prev_stage:
-                    stage = next_stage
-                    logger.info(f"📊 [TRACK_DECISION] Stage transition: action by P{player_id} occurred on stage {stage} (prev: {prev_stage}, next: {next_stage})")
-                else:
-                    stage = prev_stage
-            
-            # Get the hand for the player who just acted
-            # CRITICAL: Always prefer the provided player_hand (captured before action) over raw_obs
-            # raw_obs.get('hand') returns the hand from the CURRENT player's perspective (whose turn it is),
-            # not necessarily the ACTING player's perspective, which can cause wrong hands to be recorded
-            current_player_in_state = raw_obs.get('current_player', None)
-            hand_cards = []
-            hand_source = None
-            
-            if player_hand is not None and len(player_hand) > 0:
-                # Convert Card objects to strings if needed
-                try:
-                    from rlcard.games.base import Card
-                    if player_hand and isinstance(player_hand[0], Card):
-                        hand_cards = [str(card) for card in player_hand]
-                    else:
-                        hand_cards = [str(c) for c in player_hand] if player_hand else []
-                except:
-                    hand_cards = [str(c) for c in player_hand] if player_hand else []
-                hand_source = "provided_before_action"
-                logger.info(f"📊 [TRACK_DECISION] Player {player_id}: Using provided hand (captured before action): {hand_cards}, State current_player: {current_player_in_state}")
-            else:
-                # Fallback: Try to get hand from game object if available
-                hand_cards = []
-                if session_id in self.games:
-                    game = self.games[session_id]
-                    env = game.get('env')
-                    try:
-                        if env and hasattr(env, 'game') and hasattr(env.game, 'players') and player_id < len(env.game.players):
-                            player_obj = env.game.players[player_id]
-                            if hasattr(player_obj, 'hand'):
-                                raw_hand = player_obj.hand if player_obj.hand else []
-                                # Convert Card objects to strings if needed
-                                try:
-                                    from rlcard.games.base import Card
-                                    if raw_hand and isinstance(raw_hand[0], Card):
-                                        hand_cards = [str(card) for card in raw_hand]
-                                    else:
-                                        hand_cards = [str(c) for c in raw_hand] if raw_hand else []
-                                except:
-                                    hand_cards = [str(c) for c in raw_hand] if raw_hand else []
-                                hand_source = "game_object"
-                                logger.info(f"📊 [TRACK_DECISION] Player {player_id}: Using hand from game object: {hand_cards}, State current_player: {current_player_in_state}")
-                    except Exception as e:
-                        logger.warning(f"⚠️ [TRACK_DECISION] Failed to get hand from game object for player {player_id}: {e}")
-                
-                # Last resort: Use raw_obs (WARNING: This may be wrong if raw_obs is from different player's perspective)
-                if not hand_cards:
-                    raw_obs_hand = raw_obs.get('hand', [])
-                    if raw_obs_hand:
-                        # Convert to strings if needed
-                        try:
-                            from rlcard.games.base import Card
-                            if raw_obs_hand and isinstance(raw_obs_hand[0], Card):
-                                hand_cards = [str(card) for card in raw_obs_hand]
-                            else:
-                                hand_cards = [str(c) for c in raw_obs_hand] if raw_obs_hand else []
-                        except:
-                            hand_cards = [str(c) for c in raw_obs_hand] if raw_obs_hand else []
-                        hand_source = "raw_obs_last_resort"
-                        if current_player_in_state != player_id:
-                            logger.warning(f"⚠️ [TRACK_DECISION] Player {player_id}: Using raw_obs hand as last resort (POTENTIALLY WRONG - state.current_player={current_player_in_state} != acting_player={player_id}): {hand_cards}")
-                        else:
-                            logger.warning(f"⚠️ [TRACK_DECISION] Player {player_id}: Using raw_obs hand as last resort (state.current_player matches acting_player): {hand_cards}")
-                    else:
-                        hand_source = "none"
-                        logger.warning(f"⚠️ [TRACK_DECISION] Player {player_id}: No hand available for decision tracking (state.current_player={current_player_in_state})")
-            
-            # Convert numpy types to native Python types for JSON serialization
-            import numpy as np
-            from enum import Enum
-            
-            # Convert action (handle Action enum, numpy types, and primitives)
-            if hasattr(action, 'value'):
-                # It's an enum (like Action enum from RLCard)
-                action = action.value
-            elif isinstance(action, (np.integer, np.int64, np.int32)):
-                action = int(action)
-            elif isinstance(action, (int, float)):
-                action = int(action)
-            elif isinstance(action, str):
-                # Already a string, keep it
-                pass
-            else:
-                # Try to convert to int as fallback
-                try:
-                    action = int(action)
-                except (ValueError, TypeError):
-                    action = str(action)
-            
-            # Convert stage
-            if isinstance(stage, (np.integer, np.int64, np.int32)):
-                stage = int(stage)
+            # Get stage directly from RLCard state (now consistent)
+            stage = raw_obs.get('stage', 0)
+            if hasattr(stage, 'value'):
+                stage = stage.value
             elif not isinstance(stage, int):
                 stage = int(stage) if stage else 0
-            
-            # Convert pot
-            pot = raw_obs.get('pot', 0)
-            if isinstance(pot, (np.integer, np.int64, np.int32, np.floating, np.float64)):
-                pot = int(pot) if isinstance(pot, (np.integer, np.int64, np.int32)) else int(float(pot))
-            else:
-                pot = int(pot) if pot else 0
-            
-            # Convert stakes
-            stakes = raw_obs.get('stakes', [0, 0])
-            stakes_converted = []
-            for s in stakes:
-                if isinstance(s, (np.integer, np.int64, np.int32, np.floating, np.float64)):
-                    stakes_converted.append(int(s) if isinstance(s, (np.integer, np.int64, np.int32)) else int(float(s)))
-                else:
-                    stakes_converted.append(int(s) if s else 0)
-            
-            # Get additional context from game state if available
-            all_chips = [0, 0]
-            big_blind = 2
-            dealer_id = None
-            position = None
+
+            # SIMPLIFIED: Get hand directly from RLCard's consistent state
+            # With native BB-first action order, state should be consistent
+            hand_cards = []
             if session_id in self.games:
                 game = self.games[session_id]
                 env = game.get('env')
-                # Get dealer_id to determine position
-                if env and hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                    dealer_id = env.game.dealer_id
-                # Get chip counts from game state if available
-                if hasattr(game.get('env', None), 'game') and hasattr(game['env'].game, 'players'):
-                    try:
-                        all_chips = [int(p.chips) for p in game['env'].game.players]
-                    except:
-                        pass
-                # Get big blind from stakes if available
-                if stakes_converted and len(stakes_converted) >= 2:
-                    big_blind = max(stakes_converted) if stakes_converted else 2
-            
-            # Determine position based on dealer_id (heads-up: dealer is BB, non-dealer is SB/button)
-            if dealer_id is not None:
-                if player_id == 0:
-                    # Player 0: if dealer_id == 0, player is BB; if dealer_id == 1, player is button
-                    position = 'big_blind' if dealer_id == 0 else 'button'
-                else:
-                    # Player 1: if dealer_id == 1, player is BB; if dealer_id == 0, player is button
-                    position = 'big_blind' if dealer_id == 1 else 'button'
-            
-            # Get public cards - use next_state if available to capture board after action
-            # For stage transitions (preflop → postflop), next_state will have the new board cards
-            public_cards = raw_obs.get('public_cards', [])
-            if next_state:
-                next_raw_obs = next_state.get('raw_obs', {})
-                next_public_cards = next_raw_obs.get('public_cards', [])
-                # Use next_state public_cards if they exist (for stage transitions) or if they're more complete
-                if next_public_cards and len(next_public_cards) > len(public_cards):
-                    public_cards = next_public_cards
-                    logger.debug(f"📊 [TRACK_DECISION] Using public_cards from next_state (stage transition): {public_cards}")
-            
-            # Build decision record
-            decision = {
-                'player_id': int(player_id) if isinstance(player_id, (np.integer, np.int64, np.int32)) else player_id,
-                'action': action,
-                'stage': stage,  # Stage at which the action was taken (pre-action state)
-                'pot': pot,
-                'hand': hand_cards,  # Hand of the player who just acted
-                'public_cards': public_cards,  # Board cards (may be from next_state for stage transitions)
-                'stakes': stakes_converted,
-                'all_chips': all_chips,  # Add chip counts for context
-                'big_blind': big_blind,  # Add big blind for context
-                'position': position  # Add position for context
-            }
-            
-            hand_history_storage[session_id].append(decision)
-            
-            # Calculate bet_amount from state difference (similar to _build_action_history)
-            # For raise actions: use total amount raised TO (ActionLabeling expects this)
-            # For call/check: use the difference (amount to call)
+                if env and hasattr(env, 'game') and hasattr(env.game, 'players') and player_id < len(env.game.players):
+                    player_obj = env.game.players[player_id]
+                    if hasattr(player_obj, 'hand') and player_obj.hand:
+                        # Convert Card objects to strings for JSON serialization
+                        try:
+                            from rlcard.games.base import Card
+                            if isinstance(player_obj.hand[0], Card):
+                                hand_cards = [str(card) for card in player_obj.hand]
+                            else:
+                                hand_cards = [str(c) for c in player_obj.hand]
+                        except:
+                            hand_cards = [str(c) for c in player_obj.hand]
+
+            # Convert action to serializable format
+            if hasattr(action, 'value'):
+                action_value = action.value
+            else:
+                action_value = int(action) if action is not None else 0
+
+            # Get pot from next_state (after the action was taken)
+            pot = next_raw_obs.get('pot', raw_obs.get('pot', 0))
+            pot = int(pot) if pot else 0
+
+            # Get public cards from next_state (after the action)
+            public_cards = next_raw_obs.get('public_cards', raw_obs.get('public_cards', []))
+
+            # Calculate bet amount for this action
             bet_amount = 0
-            if state and next_state:
-                before_obs = state.get('raw_obs', {})
-                after_obs = next_state.get('raw_obs', {})
-                before_raised = before_obs.get('raised', [0, 0])
-                after_raised = after_obs.get('raised', [0, 0])
-                
-                if player_id is not None and player_id < len(before_raised) and player_id < len(after_raised):
-                    before_amount = before_raised[player_id]
-                    after_amount = after_raised[player_id]
-                    
-                    # Get action value to determine if it's a raise
-                    action_value = action
-                    if isinstance(action, (int, float)):
-                        action_value = int(action)
-                    
-                    # For raise actions (2, 3) and all-in (4), use total amount raised TO
-                    # ActionLabeling._get_raise_label expects the total amount raised TO, not the additional amount
-                    if action_value in [2, 3, 4]:
-                        bet_amount = after_amount  # Total amount raised TO
-                    else:
-                        # For call/check (1) or fold (0), use the difference
-                        bet_amount = after_amount - before_amount
-            
-            # Get env from game state for proper action labeling
-            env = None
-            if session_id in self.games:
-                game = self.games[session_id]
-                env = game.get('env', None)
-            
-            # Enhanced logging for tracked decisions
+            try:
+                # For action labeling, bet_amount represents the total amount raised TO
+                previous_pot = raw_obs.get('pot', 0)
+                current_pot = next_raw_obs.get('pot', 0)
+                pot_increase = current_pot - previous_pot
+
+                if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
+                    # For raise actions, bet_amount is the amount the player raised TO
+                    # This is the new pot value for single-raise actions
+                    bet_amount = current_pot
+                elif action_value == 1:  # Check/Call
+                    # For call actions, bet_amount is the amount called to
+                    # This will be determined by ActionLabeling based on opponent_raised
+                    bet_amount = 0
+                else:
+                    bet_amount = 0
+
+            except Exception as e:
+                bet_amount = 0
+
+            # Create decision record
+            decision_record = {
+                'player_id': player_id,
+                'action': action_value,
+                'stage': stage,
+                'pot': pot,
+                'hand': hand_cards,
+                'public_cards': public_cards,
+                'bet_amount': bet_amount,
+                'timestamp': time.time()
+            }
+
+            # Add to hand history
+            hand_history_storage[session_id].append(decision_record)
+
+            # Log the decision (simplified)
             stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
             stage_name = stage_names.get(stage, f'Stage {stage}')
-            player_name = 'Player' if player_id == 0 else 'AI'
-            action_name = self._action_to_string(action, env, state, player_id, bet_amount) if hasattr(self, '_action_to_string') else f'Action {action}'
-            
-            # Log hand that was recorded
-            hand_str = ', '.join([str(c) for c in hand_cards]) if hand_cards else 'None'
+            action_name = f'Action {action_value}'
+            hand_str = ', '.join(hand_cards) if hand_cards else 'None'
             public_cards_str = ', '.join([str(c) for c in public_cards]) if public_cards else 'None'
-            logger.info(f"📊 Decision tracked - Session: {session_id}, {player_name} (ID: {player_id}), {stage_name}, {action_name} ({action}), Pot: {pot}, Hand: [{hand_str}], Board: [{public_cards_str}], Source: {hand_source}")
+
+            logger.info(f"📊 Decision tracked - Session: {session_id}, Player {player_id}, {stage_name}, Action: {action_value}, Pot: {pot}, Hand: [{hand_str}], Board: [{public_cards_str}]")
+
+        except Exception as e:
+            logger.warning(f"Error tracking decision for session {session_id}: {str(e)}")
+            # Don't fail the game if tracking fails
         except Exception as e:
             logger.warning(f"Error tracking decision for session {session_id}: {str(e)}")
             # Don't fail the game if tracking fails

@@ -126,105 +126,79 @@ def calculate_pot_from_state(raw_obs, env=None):
     elif not isinstance(stage, int):
         stage = int(stage) if stage else 0
     
-    # For postflop, use raised array which should now be cumulative (reconstructed from action history)
-    if stage > 0:
-        raised = raw_obs.get('raised', [0, 0])
-        raised_sum = sum(int(r) if r else 0 for r in raised)
+    # SIMPLIFIED: Use RLCard's natural pot calculation
+    # With native BB-first action order, RLCard should provide correct pot
+    pot = raw_obs.get('pot', 0)
+    if pot > 0:
+        return int(pot)
 
-        if raised_sum > 0:
-            # Use the cumulative raised array to calculate pot
-            big_blind = raw_obs.get('big_blind', 2)
-            dealer_id = None
-            if env is not None:
-                if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                    dealer_id = env.game.dealer_id
-                elif hasattr(env, 'dealer_id'):
-                    dealer_id = env.dealer_id
-            pot = calculate_pot(raised, big_blind, dealer_id, 0)  # Use stage 0 for cumulative calculation
-            return pot
-
-        # Fallback: Try to get from env.game.players (most reliable for cumulative pot)
-        if env is not None and hasattr(env, 'game') and hasattr(env.game, 'players'):
-            try:
-                in_chips = []
-                for p in env.game.players:
-                    chip_value = p.in_chips
-                    # Handle numpy types
-                    if hasattr(chip_value, 'item'):
-                        chip_value = chip_value.item()
-                    in_chips.append(int(chip_value))
-
-                if len(in_chips) >= 2:
-                    pot = calculate_cumulative_pot(in_chips)
-                    return pot
-            except Exception as e:
-                pass
-
-        # Secondary: Calculate from stakes (remaining chips)
-        stakes = raw_obs.get('stakes', None)
-        if stakes and len(stakes) >= 2:
-            try:
-                # For heads-up, assume standard starting stack of 100
-                starting_stack = 100
-                invested = [starting_stack - int(s) for s in stakes]
-                pot = sum(invested)
-                return pot
-            except Exception as e:
-                pass
-
-        # If we get here, something went wrong - use fallback
-        # Fallback: Use raised array for current betting round only (not cumulative)
-        raised = raw_obs.get('raised', [0, 0])
-        big_blind = raw_obs.get('big_blind', 2)
-        dealer_id = None
-        if env is not None:
-            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-                dealer_id = env.game.dealer_id
-            elif hasattr(env, 'dealer_id'):
-                dealer_id = env.dealer_id
-        pot = calculate_pot(raised, big_blind, dealer_id, stage)
-        return pot
-    
-    # For preflop: Use raised array calculation (reconstructed from action history)
+    # Fallback: Calculate from raised array and in_chips
     raised = raw_obs.get('raised', [0, 0])
     raised_sum = sum(int(r) if r else 0 for r in raised)
-    
-    if raised_sum > 0:  # If raised array has values, use it (most accurate for preflop)
+
+    if raised_sum > 0:
+        # For postflop, raised should represent current round bets
         big_blind = raw_obs.get('big_blind', 2)
-        
-        # Get dealer_id from env if available
         dealer_id = None
         if env is not None:
             if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
                 dealer_id = env.game.dealer_id
             elif hasattr(env, 'dealer_id'):
                 dealer_id = env.dealer_id
-        
         pot = calculate_pot(raised, big_blind, dealer_id, stage)
         return pot
 
-    # Fallback: Try to get from env.game.players (for preflop if raised array is empty)
+    # Last fallback: Try to get from env.game.players in_chips
     if env is not None and hasattr(env, 'game') and hasattr(env.game, 'players'):
         try:
-            in_chips = [int(p.in_chips) for p in env.game.players]
+            in_chips = []
+            for p in env.game.players:
+                chip_value = p.in_chips
+                # Handle numpy types
+                if hasattr(chip_value, 'item'):
+                    chip_value = chip_value.item()
+                in_chips.append(int(chip_value))
+
             if len(in_chips) >= 2:
                 pot = calculate_cumulative_pot(in_chips)
                 return pot
         except Exception as e:
-            logger.warning(f"Failed to get in_chips from env.game.players: {e}")
             pass
 
-    # Last resort: Use raised array even if zero (for edge cases)
-    big_blind = raw_obs.get('big_blind', 2)
-    dealer_id = None
-    if env is not None:
-        if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
-            dealer_id = env.game.dealer_id
-        elif hasattr(env, 'dealer_id'):
-            dealer_id = env.dealer_id
+    return 0
     
-    pot = calculate_pot(raised, big_blind, dealer_id, stage)
-    return pot
+    # SIMPLIFIED: Use RLCard's natural pot calculation for preflop too
+    pot = raw_obs.get('pot', 0)
+    if pot > 0:
+        return int(pot)
+
+    # Fallback: Calculate from raised array
+    raised = raw_obs.get('raised', [0, 0])
+    raised_sum = sum(int(r) if r else 0 for r in raised)
+
+    if raised_sum > 0:
+        big_blind = raw_obs.get('big_blind', 2)
+        dealer_id = None
+        if env is not None:
+            if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
+                dealer_id = env.game.dealer_id
+            elif hasattr(env, 'dealer_id'):
+                dealer_id = env.dealer_id
+
+        pot = calculate_pot(raised, big_blind, dealer_id, stage)
+        return pot
+
+    # Last fallback: Try to get from env.game.players in_chips
+    if env is not None and hasattr(env, 'game') and hasattr(env.game, 'players'):
+        try:
+            in_chips = [int(p.in_chips) for p in env.game.players]
+            if len(in_chips) >= 2 and sum(in_chips) > 0:
+                pot = calculate_cumulative_pot(in_chips)
+                return pot
+        except Exception as e:
+            pass
+
+    return 0
 
 
 def pot_to_bb(pot_chips, big_blind):

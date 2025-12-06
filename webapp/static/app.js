@@ -292,6 +292,11 @@ class PokerGame {
             }
 
             this.gameState = await response.json();
+            // Check if stage changed (new street dealt)
+            const previousStage = this.lastStage;
+            const currentStage = this.gameState.stage || 0;
+            const stageChanged = (previousStage !== null && previousStage !== currentStage);
+
             this.updateDisplayWithAnimation('player');
 
             // If game is over, show results
@@ -302,7 +307,9 @@ class PokerGame {
 
             // Wait for animations to complete before processing opponent turn
             // This gives time to see the user's action and its effects
-            await new Promise(resolve => setTimeout(resolve, 1200));
+            // If stage changed (new cards dealt), wait longer for card reveal animations
+            const animationDelay = stageChanged ? 2200 : 1200;  // Extra 1000ms for card animations
+            await new Promise(resolve => setTimeout(resolve, animationDelay));
 
             // Process AI turn if it's AI's turn
             // Note: We need to temporarily reset isProcessing because processAITurn checks it
@@ -810,68 +817,8 @@ class PokerGame {
         let playerBet = raised[0] || 0;
         let opponentBet = raised[1] || 0;
         
-        // Fallback: If raised is [0, 0] but we're in the middle of a betting round (not at the very start),
-        // try to get bet amounts from the most recent actions in the current stage
-        // This handles cases where the backend's raised array might not be properly updated
-        if (playerBet === 0 && opponentBet === 0 && !stageChanged && this.gameState.action_history) {
-            const actionHistory = this.gameState.action_history || [];
-            const currentStage = this.gameState.stage || 0;
-            
-            // Find the most recent action in the current stage
-            // For preflop, look for actions after blinds
-            // For postflop, look for actions after the community cards for this stage
-            let stageStartIndex = -1;
-            
-            // Find where current stage starts
-            if (currentStage === 0) {
-                // For preflop, find the last blind action, then start from there
-                for (let i = 0; i < actionHistory.length; i++) {
-                    if (actionHistory[i].type === 'blind') {
-                        stageStartIndex = i + 1;
-                    } else if (actionHistory[i].type === 'action') {
-                        // If we've passed blinds and found an action, we're in the right place
-                        if (stageStartIndex === -1) {
-                            stageStartIndex = i;
-                        }
-                        break;
-                    }
-                }
-                // If no blinds found, start from beginning
-                if (stageStartIndex === -1) {
-                    stageStartIndex = 0;
-                }
-            } else {
-                // For postflop, find the community cards for this stage
-                for (let i = actionHistory.length - 1; i >= 0; i--) {
-                    const action = actionHistory[i];
-                    if (action.type === 'community_cards') {
-                        const stageName = action.stage || '';
-                        const stageMap = { 'Flop': 1, 'Turn': 2, 'River': 3 };
-                        const actionStage = stageMap[stageName] || 0;
-                        if (actionStage === currentStage) {
-                            stageStartIndex = i + 1;
-                            break;
-                        }
-                    }
-                }
-            }
-            
-            // If we found the stage start, look for bets in this stage
-            if (stageStartIndex >= 0) {
-                for (let i = actionHistory.length - 1; i >= stageStartIndex; i--) {
-                    const action = actionHistory[i];
-                    if (action.type === 'action' && action.bet_amount > 0) {
-                        if (action.player_id === 0) {
-                            playerBet = action.bet_amount;
-                        } else if (action.player_id === 1) {
-                            opponentBet = action.bet_amount;
-                        }
-                        // Once we have both or have checked all actions, break
-                        if (playerBet > 0 && opponentBet > 0) break;
-                    }
-                }
-            }
-        }
+        // Note: Bet amounts are now reliably tracked via raised array from backend
+        // No need for fallback inference from action history
         
         // Calculate unmatched amounts (for pot calculation)
         const playerUnmatched = Math.max(0, playerBet - opponentBet);
@@ -937,157 +884,129 @@ class PokerGame {
     }
 
     updateActionHistory() {
-        if (!this.gameState || !this.gameState.action_history) return;
-
+        // Use new event-based history (hand_events) if available, fallback to legacy action_history
+        const handEvents = this.gameState?.hand_events || [];
+        const legacyHistory = this.gameState?.action_history || [];
+        
         const historyContainer = document.getElementById('actionHistory');
         if (!historyContainer) return;
 
-        const actionHistory = this.gameState.action_history || [];
-        
-        // Only update if there are new actions
-        if (actionHistory.length <= this.displayedActionCount) return;
+        // Use event-based history if available
+        if (handEvents.length > 0) {
+            // Only update if there are new events
+            if (handEvents.length <= this.displayedActionCount) return;
 
-        // Add new actions
-        for (let i = this.displayedActionCount; i < actionHistory.length; i++) {
-            const action = actionHistory[i];
+            // Add new events
+            for (let i = this.displayedActionCount; i < handEvents.length; i++) {
+                const event = handEvents[i];
+                
+                // Show action label above cards for action and blind events
+                if ((event.kind === 'action' || event.kind === 'blind') && event.player_idx !== null) {
+                    this.showActionLabelOnCards(event);
+                }
+                
+                const actionEntry = document.createElement('div');
+                
+                // Handle different event types
+                if (event.kind === 'community') {
+                    // Community cards (Flop/Turn/River)
+                    actionEntry.className = 'action-entry community-cards-entry';
+                    const cardsText = event.cards.map(card => this.formatCard(card)).join(' ');
+                    actionEntry.innerHTML = `
+                        <span class="community-cards-label">${event.label}:</span>
+                        <span class="community-cards">${cardsText}</span>
+                    `;
+                } else if (event.kind === 'blind') {
+                    // Blind posting
+                    actionEntry.className = `action-entry blind-entry ${event.player_idx === 0 ? 'player-action' : 'opponent-action'}`;
+                    const playerName = event.player_idx === 0 ? 'You' : 'Opponent';
+                    const bigBlind = this.gameState.big_blind || 2;
+                    const blindBB = event.amount ? (event.amount / bigBlind).toFixed(1) : '0';
+                    actionEntry.innerHTML = `
+                        <span class="player-name">${playerName}:</span>
+                        <span class="blind-label">${event.label}</span>
+                        <span class="bet-amount">(${blindBB} BB)</span>
+                    `;
+                } else if (event.kind === 'action') {
+                    // Player action
+                    actionEntry.className = `action-entry ${event.player_idx === 0 ? 'player-action' : 'opponent-action'}`;
+                    const playerName = event.player_idx === 0 ? 'You' : 'Opponent';
+                    actionEntry.innerHTML = `
+                        <span class="player-name">${playerName}:</span>
+                        <span class="action-name">${event.label}</span>
+                    `;
+                } else if (event.kind === 'win') {
+                    // Hand conclusion
+                    actionEntry.className = `action-entry win-entry ${event.player_idx === 0 ? 'player-action' : 'opponent-action'}`;
+                    const playerName = event.player_idx === 0 ? 'You' : 'Opponent';
+                    actionEntry.innerHTML = `
+                        <span class="player-name">${playerName}:</span>
+                        <span class="win-label">${event.label}</span>
+                    `;
+                }
+                
+                historyContainer.appendChild(actionEntry);
+            }
+
+            // Scroll to bottom to show latest action
+            historyContainer.scrollTop = historyContainer.scrollHeight;
+            this.displayedActionCount = handEvents.length;
+
+            // Limit displayed actions to last 20
+            while (historyContainer.children.length > 20) {
+                historyContainer.removeChild(historyContainer.firstChild);
+            }
+        } else if (legacyHistory.length > 0) {
+            // Fallback to legacy format for backward compatibility
+            if (legacyHistory.length <= this.displayedActionCount) return;
             
-            // Show action text above cards for player actions (not blinds or community cards)
-            if (action.type !== 'community_cards' && action.type !== 'blind' && action.action) {
-                this.showActionAboveCards(action);
+            // Process legacy format (simplified - just show basic info)
+            for (let i = this.displayedActionCount; i < legacyHistory.length; i++) {
+                const action = legacyHistory[i];
+                const actionEntry = document.createElement('div');
+                
+                if (action.type === 'community_cards') {
+                    actionEntry.className = 'action-entry community-cards-entry';
+                    const cardsText = (action.all_cards || []).map(card => this.formatCard(card)).join(' ');
+                    actionEntry.innerHTML = `
+                        <span class="community-cards-label">${action.stage}:</span>
+                        <span class="community-cards">${cardsText}</span>
+                    `;
+                } else if (action.type === 'blind') {
+                    actionEntry.className = `action-entry blind-entry ${action.player_id === 0 ? 'player-action' : 'opponent-action'}`;
+                    const bigBlind = this.gameState.big_blind || 2;
+                    const blindBB = action.amount ? (action.amount / bigBlind).toFixed(1) : '0';
+                    const blindLabel = action.blind_type === 'small' ? 'Posts Small Blind' : 'Posts Big Blind';
+                    actionEntry.innerHTML = `
+                        <span class="player-name">${action.player_name}:</span>
+                        <span class="blind-label">${blindLabel}</span>
+                        <span class="bet-amount">(${blindBB} BB)</span>
+                    `;
+                } else {
+                    actionEntry.className = `action-entry ${action.player_id === 0 ? 'player-action' : 'opponent-action'}`;
+                    actionEntry.innerHTML = `
+                        <span class="player-name">${action.player_name}:</span>
+                        <span class="action-name">${action.action || 'Action'}</span>
+                    `;
+                }
+                
+                historyContainer.appendChild(actionEntry);
             }
             
-            const actionEntry = document.createElement('div');
+            historyContainer.scrollTop = historyContainer.scrollHeight;
+            this.displayedActionCount = legacyHistory.length;
             
-            // Handle community card entries
-            if (action.type === 'community_cards') {
-                actionEntry.className = 'action-entry community-cards-entry';
-                
-                // Format cards for display
-                const cardsText = action.all_cards.map(card => this.formatCard(card)).join(' ');
-                
-                actionEntry.innerHTML = `
-                    <span class="community-cards-label">${action.stage}:</span>
-                    <span class="community-cards">${cardsText}</span>
-                `;
-            } else if (action.type === 'blind') {
-                // Blind entry
-                actionEntry.className = `action-entry blind-entry ${action.player_id === 0 ? 'player-action' : 'opponent-action'}`;
-                
-                const bigBlind = this.gameState.big_blind || 2;
-                const blindBB = (action.amount / bigBlind).toFixed(1);
-                const blindLabel = action.blind_type === 'small' ? 'Posts Small Blind' : 'Posts Big Blind';
-                
-                actionEntry.innerHTML = `
-                    <span class="player-name">${action.player_name}:</span>
-                    <span class="blind-label">${blindLabel}</span>
-                    <span class="bet-amount">(${blindBB} BB)</span>
-                `;
-            } else {
-                // Regular action entry
-                actionEntry.className = `action-entry ${action.player_id === 0 ? 'player-action' : 'opponent-action'}`;
-
-                let displayAction = action.action;
-
-                // Special handling for Check/Call - determine if it was actually Check or Call based on bet amount
-                if (action.action === 'Check/Call') {
-                    if (action.bet_amount > 0) {
-                        displayAction = 'Call';
-                    } else {
-                        displayAction = 'Check';
-                    }
-                }
-
-                let actionText = `<span class="player-name">${action.player_name}:</span> <span class="action-name">${displayAction}</span>`;
-
-                const bigBlind = this.gameState.big_blind || 2;
-                
-                // Special handling for "All-In" - always show BB
-                if (action.action === 'All-In' || action.action.includes('All-In')) {
-                    let betAmount = action.bet_amount;
-                    // Fallback: try to calculate from game state if bet_amount is missing
-                    if (!betAmount || betAmount === 0) {
-                        // Try to get from in_chips or raised array
-                        const inChips = this.gameState.in_chips || [0, 0];
-                        const raised = this.gameState.raised || [0, 0];
-                        if (action.player_id === 0 && inChips[0] > 0) {
-                            betAmount = inChips[0];
-                        } else if (action.player_id === 1 && inChips[1] > 0) {
-                            betAmount = inChips[1];
-                        } else if (action.player_id === 0 && raised[0] > 0) {
-                            betAmount = raised[0];
-                        } else if (action.player_id === 1 && raised[1] > 0) {
-                            betAmount = raised[1];
-                        }
-                    }
-                    if (betAmount > 0) {
-                        const betBB = (betAmount / bigBlind).toFixed(1);
-                        actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
-                    }
-                }
-                // Special handling for various raise/bet actions - show BB when appropriate
-                else if (action.action.includes('Raise') || action.action.includes('Bet') || 
-                         action.action.includes('3-bet') || action.action.includes('4-bet')) {
-                    let betAmount = action.bet_amount;
-                    const isPreflop = action.stage === 0 || action.stage === 'Preflop' || action.stage === 'preflop';
-                    
-                    // Extract BB amount from action name if it contains "to X BB"
-                    const bbMatch = action.action.match(/to (\d+)\s*BB/i);
-                    if (bbMatch) {
-                        const bbAmount = parseInt(bbMatch[1]);
-                        betAmount = bbAmount * bigBlind;
-                    } else if (!betAmount || betAmount === 0) {
-                        // Fallback: calculate from current pot if bet_amount is missing
-                        const currentPot = this.gameState.pot || 0;
-                        if (action.action === 'Raise Pot' || action.action === 'Bet Pot') {
-                            betAmount = currentPot;
-                        } else if (action.action === 'Raise ½ Pot' || action.action === 'Bet ½ Pot') {
-                            betAmount = Math.floor(currentPot / 2);
-                        } else if (action.action === 'Bet ⅔ Pot') {
-                            betAmount = Math.floor(currentPot * 2 / 3);
-                        } else if (action.action === 'Raise to 3BB') {
-                            betAmount = 3 * bigBlind;
-                        }
-                    }
-                    
-                    // For preflop actions, always show BB amount (convert pot percentages to BB if needed)
-                    if (isPreflop && betAmount > 0) {
-                        const betBB = (betAmount / bigBlind).toFixed(1);
-                        // Only add BB amount if not already in the label
-                        if (!action.action.match(/\d+\s*BB/i)) {
-                            actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
-                        }
-                    } else if (!isPreflop && betAmount > 0 && !action.action.match(/\d+\s*BB/)) {
-                        // For postflop, show BB amount if not already in label
-                        const betBB = (betAmount / bigBlind).toFixed(1);
-                        actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
-                    }
-                }
-                // Removed bet amount display for Call actions - keep "Call" text only
-                // Add bet amount for Blind actions
-                else if (action.action.includes('Blind') && action.bet_amount > 0) {
-                    const betBB = (action.bet_amount / bigBlind).toFixed(1);
-                    actionText += ` <span class="bet-amount">(${betBB} BB)</span>`;
-                }
-                
-                actionEntry.innerHTML = actionText;
+            while (historyContainer.children.length > 20) {
+                historyContainer.removeChild(historyContainer.firstChild);
             }
-            
-            historyContainer.appendChild(actionEntry);
-        }
-
-        // Scroll to bottom to show latest action
-        historyContainer.scrollTop = historyContainer.scrollHeight;
-        this.displayedActionCount = actionHistory.length;
-
-        // Limit displayed actions to last 20
-        while (historyContainer.children.length > 20) {
-            historyContainer.removeChild(historyContainer.firstChild);
         }
     }
 
-    showActionAboveCards(action) {
-        // Determine which player took the action
-        const isOpponent = action.player_id === 1;
+    showActionLabelOnCards(event) {
+        // Show action label above the correct player's cards based on event
+        if (!event || event.player_idx === null || event.player_idx === undefined) return;
+        
+        const isOpponent = event.player_idx === 1;
         const cardsContainer = isOpponent 
             ? document.getElementById('opponentCards')
             : document.getElementById('playerCards');
@@ -1108,78 +1027,8 @@ class PokerGame {
         const overlay = document.createElement('div');
         overlay.className = 'action-text-overlay';
         
-        // Format the action text (just the action name, not player name)
-        // Match the formatting logic from updateActionHistory
-        let actionText = action.action;
-        
-        // Special handling for Check/Call - determine if it was actually Check or Call based on bet amount
-        if (action.action === 'Check/Call') {
-            if (action.bet_amount > 0) {
-                actionText = 'Call';
-            } else {
-                actionText = 'Check';
-            }
-        }
-        
-        const bigBlind = this.gameState.big_blind || 2;
-        
-        // Special handling for "All-In" - always show BB
-        if (action.action === 'All-In' || action.action.includes('All-In')) {
-            let betAmount = action.bet_amount;
-            // Fallback: try to calculate from game state if bet_amount is missing
-            if (!betAmount || betAmount === 0) {
-                const inChips = this.gameState.in_chips || [0, 0];
-                const raised = this.gameState.raised || [0, 0];
-                if (action.player_id === 0 && inChips[0] > 0) {
-                    betAmount = inChips[0];
-                } else if (action.player_id === 1 && inChips[1] > 0) {
-                    betAmount = inChips[1];
-                } else if (action.player_id === 0 && raised[0] > 0) {
-                    betAmount = raised[0];
-                } else if (action.player_id === 1 && raised[1] > 0) {
-                    betAmount = raised[1];
-                }
-            }
-            if (betAmount > 0) {
-                const betBB = (betAmount / bigBlind).toFixed(1);
-                actionText += ` (${betBB} BB)`;
-            }
-        }
-        // Special handling for various raise/bet actions - show BB when appropriate
-        else if (action.action.includes('Raise') || action.action.includes('Bet') || 
-                 action.action.includes('3-bet') || action.action.includes('4-bet')) {
-            // If action already contains BB (like "Raise to 3BB"), use it as-is
-            if (!action.action.match(/\d+\s*BB/i)) {
-                let betAmount = action.bet_amount;
-                const isPreflop = action.stage === 0 || action.stage === 'Preflop' || action.stage === 'preflop';
-                
-                // Extract BB amount from action name if it contains "to X BB"
-                const bbMatch = action.action.match(/to (\d+)\s*BB/i);
-                if (bbMatch) {
-                    // Already has BB in the name, use as-is
-                } else if (!betAmount || betAmount === 0) {
-                    // Fallback: calculate from current pot if bet_amount is missing
-                    const currentPot = this.gameState.pot || 0;
-                    if (action.action === 'Raise Pot' || action.action === 'Bet Pot') {
-                        betAmount = currentPot;
-                    } else if (action.action === 'Raise ½ Pot' || action.action === 'Bet ½ Pot') {
-                        betAmount = Math.floor(currentPot / 2);
-                    } else if (action.action === 'Bet ⅔ Pot') {
-                        betAmount = Math.floor(currentPot * 2 / 3);
-                    } else if (action.action === 'Raise to 3BB') {
-                        betAmount = 3 * bigBlind;
-                    }
-                }
-                
-                // Add BB amount if we have a bet amount
-                if (betAmount > 0) {
-                    const betBB = (betAmount / bigBlind).toFixed(1);
-                    actionText += ` (${betBB} BB)`;
-                }
-            }
-        }
-        
-        overlay.textContent = actionText;
+        // Use the label directly from the event (already formatted correctly)
+        overlay.textContent = event.label || '';
         
         // Position in cards wrapper (which is already position: relative)
         cardsWrapper.appendChild(overlay);
@@ -1757,27 +1606,56 @@ class PokerGame {
                         // Check if it's AI's turn first (before checking for state changes)
                         // This ensures we catch the AI turn even if state hasn't "changed" yet
                         if (state.current_player === 1 && !state.is_over && !this.isProcessing) {
+                            // Check if stage changed (new street dealt)
+                            const previousStage = this.lastStage;
+                            const currentStage = state.stage || 0;
+                            const stageChanged = (previousStage !== null && previousStage !== currentStage);
+
                             // It's AI's turn - trigger AI action automatically
                             // This handles cases like after the flop when BB acts first, or preflop
-                            this.processAITurn();
+                            // If stage changed (new cards dealt), wait for card animations before AI acts
+                            if (stageChanged) {
+                                setTimeout(() => {
+                                    if (!this.isProcessing && state.current_player === 1 && !state.is_over) {
+                                        this.processAITurn();
+                                    }
+                                }, 1200); // Wait for card animations (1000ms delay + 200ms buffer)
+                            } else {
+                                this.processAITurn();
+                            }
                             return; // Exit early to avoid duplicate state updates
                         }
                         
                         // Only update if state changed significantly
-                        if (!this.gameState || 
+                        if (!this.gameState ||
                             state.is_over !== this.gameState.is_over ||
                             state.current_player !== this.gameState.current_player ||
                             state.is_waiting_for_action !== this.gameState.is_waiting_for_action ||
                             JSON.stringify(state.legal_actions) !== JSON.stringify(this.gameState.legal_actions)) {
+
+                            // Check if stage changed (new street dealt)
+                            const previousStage = this.lastStage;
+                            const currentStage = state.stage || 0;
+                            const stageChanged = (previousStage !== null && previousStage !== currentStage);
+
                             this.gameState = state;
                             this.updateDisplay();
-                            
+
                             if (state.is_over) {
                                 this.handleGameEnd();
                             } else if (state.current_player === 1 && !state.is_over && !this.isProcessing) {
                                 // It's AI's turn - trigger AI action automatically
                                 // This handles cases like after the flop when BB acts first
-                                this.processAITurn();
+                                // If stage changed (new cards dealt), wait for card animations before AI acts
+                                if (stageChanged) {
+                                    setTimeout(() => {
+                                        if (!this.isProcessing && this.gameState.current_player === 1 && !this.gameState.is_over) {
+                                            this.processAITurn();
+                                        }
+                                    }, 1200); // Wait for card animations (1000ms delay + 200ms buffer)
+                                } else {
+                                    this.processAITurn();
+                                }
                             }
                         }
                     }
