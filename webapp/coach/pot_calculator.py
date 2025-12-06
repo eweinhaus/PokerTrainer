@@ -141,7 +141,6 @@ def calculate_pot_from_state(raw_obs, env=None):
                 elif hasattr(env, 'dealer_id'):
                     dealer_id = env.dealer_id
             pot = calculate_pot(raised, big_blind, dealer_id, 0)  # Use stage 0 for cumulative calculation
-            logger.info(f"💰 [POT_CALC_POSTFLOP] Using cumulative raised array: {raised} -> pot: {pot} chips")
             return pot
 
         # Fallback: Try to get from env.game.players (most reliable for cumulative pot)
@@ -157,12 +156,8 @@ def calculate_pot_from_state(raw_obs, env=None):
 
                 if len(in_chips) >= 2:
                     pot = calculate_cumulative_pot(in_chips)
-                    logger.info(f"💰 [POT_CALC_POSTFLOP] Using in_chips from env.game.players: {in_chips} -> pot: {pot} chips")
                     return pot
             except Exception as e:
-                logger.warning(f"💰 [POT_CALC_POSTFLOP] Failed to get in_chips from env.game.players: {e}")
-                import traceback
-                logger.warning(f"💰 [POT_CALC_POSTFLOP] Traceback: {traceback.format_exc()}")
                 pass
 
         # Secondary: Calculate from stakes (remaining chips)
@@ -173,14 +168,11 @@ def calculate_pot_from_state(raw_obs, env=None):
                 starting_stack = 100
                 invested = [starting_stack - int(s) for s in stakes]
                 pot = sum(invested)
-                logger.info(f"💰 [POT_CALC_POSTFLOP] Using stakes: {stakes}, invested: {invested} -> pot: {pot} chips")
                 return pot
             except Exception as e:
-                logger.warning(f"💰 [POT_CALC_POSTFLOP] Failed to calculate pot from stakes: {e}")
                 pass
 
-        # If we get here, something went wrong - log and use fallback
-        logger.warning(f"💰 [POT_CALC_POSTFLOP] All methods failed, using raised array fallback. Stage: {stage}, raw_obs keys: {list(raw_obs.keys())}")
+        # If we get here, something went wrong - use fallback
         # Fallback: Use raised array for current betting round only (not cumulative)
         raised = raw_obs.get('raised', [0, 0])
         big_blind = raw_obs.get('big_blind', 2)
@@ -191,7 +183,6 @@ def calculate_pot_from_state(raw_obs, env=None):
             elif hasattr(env, 'dealer_id'):
                 dealer_id = env.dealer_id
         pot = calculate_pot(raised, big_blind, dealer_id, stage)
-        logger.warning(f"💰 [POT_CALC_POSTFLOP] Using raised array fallback: {raised} -> pot: {pot} chips (NOTE: This is current round only, not cumulative)")
         return pot
     
     # For preflop: Use raised array calculation (reconstructed from action history)

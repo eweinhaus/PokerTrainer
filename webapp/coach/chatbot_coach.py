@@ -818,16 +818,20 @@ You have access to current game state and hand history when provided. Use this c
                 board_cards = decision.get('public_cards', [])
                 pot = decision.get('pot', 0)
                 position = decision.get('position')
-                
+
                 action_map = {0: "Fold", 1: "Check/Call", 2: "Raise ½ Pot", 3: "Raise Pot", 4: "All-In"}
                 stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
-                
+
                 action_name = action_map.get(action, f"Action {action}")
                 stage_name = stage_map.get(stage, f"Stage {stage}")
                 hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                 board_str = self._format_cards(board_cards) if board_cards else "No board"
                 position_str = f", Position: {position}" if position else ""
-                
+
+                # Debug logging for hand cards
+                if hand_cards:
+                    print(f"[CHATBOT_DEBUG] Decision {i}: player_id={decision.get('player_id')}, hand_cards={hand_cards}, formatted={hand_str}")
+
                 parts.append(
                     f"  {i}. {stage_name}: {action_name} "
                     f"(Your hand: {hand_str}, Board: {board_str}, Pot: {pot}{position_str})"

@@ -258,42 +258,16 @@ class GameManager:
         # Get raw observation for current player
         raw_obs = state['raw_obs']
         
-        # IMPORTANT: The hand in raw_obs is from the current player's perspective
-        # When current_player == 1, raw_obs contains the opponent's hand, not player 0's hand!
-        # We need to use the stored player_hand instead of raw_obs.get('hand')
-        stored_player_hand = game.get('player_hand', [])
+        # Track game state for context
         last_stage = game.get('last_stage', -1)
         current_stage = raw_obs.get('stage', 0)
         if hasattr(current_stage, 'value'):
             current_stage = current_stage.value
         elif not isinstance(current_stage, int):
             current_stage = int(current_stage) if current_stage else 0
-        
-        # Detect new hand: stage resets to 0 after being > 0 (hand ended and new one started)
-        # Also detect if game was over and now we're starting fresh
-        was_over = game.get('was_over', False)
-        is_over = env.is_over()
-        is_new_hand = (last_stage > 0 and current_stage == 0) or (was_over and not is_over and current_stage == 0)
-        
-        # If we're at preflop (stage 0) and it's player 0's turn, update stored hand
-        # This captures the hand at the start of each new hand
-        if current_stage == 0 and current_player == 0:
-            current_hand = raw_obs.get('hand', [])
-            if current_hand and len(current_hand) == 2:
-                # Check if this is actually a new hand (different cards or new hand detected)
-                if is_new_hand or not stored_player_hand or stored_player_hand != current_hand:
-                    # New hand dealt - update stored hand
-                    game['player_hand'] = current_hand.copy()
-                    stored_player_hand = current_hand.copy()
-        # If stored hand is empty but we have a hand in raw_obs and it's player 0's turn, use it
-        elif not stored_player_hand and current_player == 0:
-            current_hand = raw_obs.get('hand', [])
-            if current_hand and len(current_hand) == 2:
-                game['player_hand'] = current_hand.copy()
-                stored_player_hand = current_hand.copy()
-        
+
         # Track if game is over for next iteration
-        game['was_over'] = is_over
+        game['was_over'] = env.is_over()
         
         # Get human player's hand (player 0) directly from the game object
         # This ensures we always have the correct hand regardless of whose turn it is
@@ -304,11 +278,8 @@ class GameManager:
                 if hasattr(human_player, 'hand'):
                     player_hand = list(human_player.hand) if human_player.hand else []
         except Exception:
-            # Fallback to stored hand or raw_obs if direct access fails
-            if stored_player_hand:
-                player_hand = stored_player_hand
-            elif current_player == 0:
-                player_hand = raw_obs.get('hand', [])
+            # Fallback to raw_obs if direct access fails
+            player_hand = raw_obs.get('hand', [])
         
         # Convert Action objects to integers for JSON serialization
         def convert_actions(actions):
@@ -551,9 +522,7 @@ class GameManager:
             modified_raw_obs['in_chips'] = in_chips
         pot = calculate_pot_from_state(modified_raw_obs, env)
         pot_bb = pot_to_bb(pot, raw_obs.get('big_blind', 2))
-        logger.info(f"💰 [POT_CALC] Session: {session_id}, Pot: {pot} chips ({pot_bb:.1f} BB), "
-                   f"Raised: {raised}, Stage: {stage}, Dealer: {dealer_id}, in_chips: {in_chips}")
-        
+
         # Build game state response
         game_state = {
             'hand': player_hand,  # Use stored player hand, not raw_obs hand
@@ -1678,6 +1647,18 @@ class GameManager:
             # RLCard environment doesn't have get_legal_actions() method, skip the re-check
             logger.info(f"🔍 [PROCESS_ACTION] Skipping legal actions re-check (RLCard doesn't support it)")
 
+        # CRITICAL: Capture the player's hand BEFORE the action is processed
+        # This ensures we record the correct hand for the player who is acting
+        player_hand_before_action = []
+        try:
+            if hasattr(env, 'game') and hasattr(env.game, 'players') and current_player < len(env.game.players):
+                player_obj = env.game.players[current_player]
+                if hasattr(player_obj, 'hand'):
+                    player_hand_before_action = list(player_obj.hand) if player_obj.hand else []
+                    logger.debug(f"🎯 [PROCESS_ACTION] Captured hand for P{current_player} before action: {player_hand_before_action}")
+        except Exception as e:
+            logger.warning(f"⚠️ [PROCESS_ACTION] Failed to capture player hand before action: {e}")
+
         # Set action in human agent
         human_agent.set_action(action)
 
@@ -1793,9 +1774,9 @@ class GameManager:
             
             # Log action result
             logger.info(f"✅ Action processed - Session: {session_id}, Next: P{next_player_id}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
-            
+
             # Track decision for hand history
-            self._track_decision(session_id, current_player, action, state, next_state)
+            self._track_decision(session_id, current_player, action, state, next_state, player_hand_before_action)
             
             return self.get_game_state(session_id)
         except Exception as e:
@@ -1907,6 +1888,17 @@ class GameManager:
             public_cards = raw_obs.get('public_cards', [])
             raised = raw_obs.get('raised', [0, 0])
 
+            # CRITICAL: Capture the AI player's hand BEFORE the action is processed
+            ai_hand_before_action = []
+            try:
+                if hasattr(env, 'game') and hasattr(env.game, 'players') and current_player < len(env.game.players):
+                    ai_player_obj = env.game.players[current_player]
+                    if hasattr(ai_player_obj, 'hand'):
+                        ai_hand_before_action = list(ai_player_obj.hand) if ai_player_obj.hand else []
+                        logger.debug(f"🤖 [AI_TURN] Captured hand for AI P{current_player} before action: {ai_hand_before_action}")
+            except Exception as e:
+                logger.warning(f"⚠️ [AI_TURN] Failed to capture AI player hand before action: {e}")
+
             # Process action - pass Action enum value when use_raw=True, action_index when use_raw=False
             # Note: RLCard's use_raw=True means "use Action enum directly", not "use indices"
             if ai_agent.use_raw:
@@ -2000,9 +1992,9 @@ class GameManager:
             
             # Log AI action result
             logger.info(f"🔄 AI action processed - Session: {session_id}, Next: P{next_player_id}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
-            
+
             # Track decision for hand history
-            self._track_decision(session_id, current_player, action, state, next_state)
+            self._track_decision(session_id, current_player, action, state, next_state, ai_hand_before_action)
             
             return self.get_game_state(session_id)
         except Exception as e:
@@ -2010,7 +2002,7 @@ class GameManager:
             # Return current state on error to prevent game from breaking
             return self.get_game_state(session_id)
     
-    def _track_decision(self, session_id, player_id, action, state, next_state):
+    def _track_decision(self, session_id, player_id, action, state, next_state, player_hand=None):
         """Track a decision for hand history"""
         try:
             if session_id not in hand_history_storage:
@@ -2026,25 +2018,14 @@ class GameManager:
             # Get raw_obs safely
             raw_obs = state.get('raw_obs', {})
             
-            # IMPORTANT: Get the correct hand for the player
-            # For player 0, use stored player_hand from game state (raw_obs contains opponent's hand when it's opponent's turn)
-            # For player 1 (opponent), use raw_obs.get('hand') since that's their hand when it's their turn
-            hand_cards = []
-            if player_id == 0:
-                # Get stored player_hand from game state
-                if session_id in self.games:
-                    stored_player_hand = self.games[session_id].get('player_hand', [])
-                    if stored_player_hand:
-                        hand_cards = stored_player_hand.copy()
-                    else:
-                        # Fallback: use raw_obs if stored hand not available (shouldn't happen normally)
-                        hand_cards = raw_obs.get('hand', [])
-                else:
-                    # Fallback: use raw_obs if game state not available
-                    hand_cards = raw_obs.get('hand', [])
+            # Get the hand for the player who just acted
+            # Use the provided player_hand if available (captured before action), otherwise fall back to raw_obs
+            if player_hand is not None:
+                hand_cards = player_hand
+                logger.debug(f"[HAND_DEBUG] Player {player_id}: Using provided hand: {hand_cards}")
             else:
-                # For opponent (player_id == 1), use raw_obs.get('hand') which contains their hand
                 hand_cards = raw_obs.get('hand', [])
+                logger.debug(f"[HAND_DEBUG] Player {player_id}: Using raw_obs hand (fallback): {hand_cards}")
             
             # Convert numpy types to native Python types for JSON serialization
             import numpy as np
@@ -2126,7 +2107,7 @@ class GameManager:
                 'action': action,
                 'stage': stage,
                 'pot': pot,
-                'hand': hand_cards,  # Use correct hand based on player_id
+                'hand': hand_cards,  # Hand of the player who just acted
                 'public_cards': raw_obs.get('public_cards', []),
                 'stakes': stakes_converted,
                 'all_chips': all_chips,  # Add chip counts for context
@@ -2684,6 +2665,13 @@ def chat():
                 logger.debug(f"Sample decision structure: {sample}")
                 player_decisions = [d for d in hand_history if d.get('player_id') == 0 or d.get('player_id') == "0" or str(d.get('player_id', '')) == "0"]
                 logger.info(f"Found {len(player_decisions)} player decisions (player_id == 0) in hand history")
+
+                # Debug logging for hand cards in recent decisions
+                for i, decision in enumerate(hand_history[-5:], 1):  # Last 5 decisions
+                    hand_cards = decision.get('hand', [])
+                    player_id = decision.get('player_id')
+                    if hand_cards:
+                        logger.info(f"[CHAT_DEBUG] Decision {len(hand_history)-5+i}: player_id={player_id}, hand_cards={hand_cards}")
             
             # Call chatbot coach with timeout handling
             response = chatbot_coach.chat(
