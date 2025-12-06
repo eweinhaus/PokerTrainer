@@ -1807,6 +1807,21 @@ class GameManager:
                 else:
                     return self.get_game_state(session_id)
 
+            # Extract action_value as a Python int (not NumPy array) to avoid boolean ambiguity errors
+            # This must be done before any comparisons to ensure it's a scalar
+            if hasattr(action, 'value'):
+                action_value_raw = action.value
+            else:
+                action_value_raw = action
+            
+            # Convert to Python int if it's a NumPy type to avoid "truth value of array" errors
+            if isinstance(action_value_raw, np.ndarray):
+                action_value = int(action_value_raw.item()) if action_value_raw.size == 1 else int(action_value_raw[0])
+            elif isinstance(action_value_raw, (np.integer, np.floating)):
+                action_value = int(action_value_raw)
+            else:
+                action_value = int(action_value_raw) if action_value_raw is not None else 0
+
             # Find action index for use_raw=True agents
             action_index = None
             if ai_agent.use_raw:
@@ -1817,14 +1832,21 @@ class GameManager:
                 for i, legal_action in enumerate(legal_actions):
                     # Handle both Action enums and integers
                     legal_value = legal_action.value if hasattr(legal_action, 'value') else legal_action
-                    action_value = action.value if hasattr(action, 'value') else action
+                    # Convert legal_value to int if it's a NumPy type
+                    if isinstance(legal_value, np.ndarray):
+                        legal_value = int(legal_value.item()) if legal_value.size == 1 else int(legal_value[0])
+                    elif isinstance(legal_value, (np.integer, np.floating)):
+                        legal_value = int(legal_value)
+                    else:
+                        legal_value = int(legal_value) if legal_value is not None else 0
+                    
                     logger.debug(f"🔍 [AI_TURN] Checking legal action {i}: {legal_action} (value: {legal_value}) vs action {action} (value: {action_value})")
                     if legal_value == action_value:
                         action_index = i
                         break
                 if action_index is None:
                     logger.error(f"❌ [AI_TURN] Could not find action {action} in legal actions {legal_actions}")
-                    logger.error(f"❌ [AI_TURN] Action type: {type(action)}, Action value: {action.value if hasattr(action, 'value') else action}")
+                    logger.error(f"❌ [AI_TURN] Action type: {type(action)}, Action value: {action_value}")
                     logger.error(f"❌ [AI_TURN] Available legal actions values: {[a.value if hasattr(a, 'value') else a for a in legal_actions]}")
                     return self.get_game_state(session_id)
             
