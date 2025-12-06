@@ -380,8 +380,7 @@ class GTOAgent:
         raw_legal_actions = state.get('raw_legal_actions', [])
 
         # Initialize logger
-        import logging
-        logger = logging.getLogger(__name__)
+        # logging removed
 
         if not raw_legal_actions:
             # No legal actions - shouldn't happen
@@ -441,7 +440,7 @@ class GTOAgent:
                     return Action.RAISE_POT
                 else:
                     # If neither all-in nor pot raise available, fall through to GTO lookup
-                    logger.warning(f"[GTO AGENT] All-in check returned True but ALL_IN/RAISE_POT not available, falling through to GTO lookup")
+                    pass
             
             # Get GTO action
             gto_action = self._get_preflop_action(hand_str, position, action_type, stack_depth)
@@ -450,17 +449,16 @@ class GTOAgent:
             
             # CRITICAL DEBUG: Check if GTO action is always 'raise'
             if gto_action == 'raise':
-                logger.warning(f"[GTO AGENT] ⚠️ GTO lookup returned 'raise' - checking if this is correct for hand {hand_str} in {action_type} scenario")
+                pass
             elif gto_action == 'call':
-                logger.debug(f"[GTO AGENT] GTO lookup returned 'call' for hand {hand_str} in {action_type} scenario")
+                pass
             elif gto_action == 'fold':
-                logger.debug(f"[GTO AGENT] GTO lookup returned 'fold' for hand {hand_str} in {action_type} scenario")
+                pass
             else:
-                logger.error(f"[GTO AGENT] ✗ GTO lookup returned unexpected value: '{gto_action}'")
+                pass
             
             # SAFEGUARD: Validate GTO action
             if gto_action not in ['raise', 'call', 'fold']:
-                logger.error(f"[GTO AGENT] Invalid GTO action '{gto_action}', defaulting to 'fold'")
                 gto_action = 'fold'
             
             # Map GTO action to RLCard Action enum
@@ -491,21 +489,16 @@ class GTOAgent:
                         elif Action.FOLD in raw_legal_actions:
                             return Action.FOLD
                     # Only use all-in as absolute last resort
-                    logger.warning(f"[GTO AGENT] No standard actions available, using first legal action: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
             elif gto_action == 'call':
                 if Action.CHECK_CALL in raw_legal_actions:
                     return Action.CHECK_CALL
                 else:
-                    logger.warning(f"[GTO AGENT] CHECK_CALL not available! Legal actions: {raw_legal_actions}")
-                    logger.warning(f"[GTO AGENT] Using first legal action as fallback: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
             else:  # fold
                 if Action.FOLD in raw_legal_actions:
                     return Action.FOLD
                 else:
-                    logger.warning(f"[GTO AGENT] FOLD not available! Legal actions: {raw_legal_actions}")
-                    logger.warning(f"[GTO AGENT] Using first legal action as fallback: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
         
         # Postflop decision
@@ -521,24 +514,18 @@ class GTOAgent:
                 elif Action.ALL_IN in raw_legal_actions:
                     return Action.ALL_IN
                 elif Action.CHECK_CALL in raw_legal_actions:
-                    logger.warning(f"[GTO AGENT] Wanted 'raise' but only CHECK_CALL available, returning CHECK_CALL")
                     return Action.CHECK_CALL
                 else:
-                    logger.warning(f"[GTO AGENT] Wanted 'raise' but no raise actions available, using first legal: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
             elif action == 'call' or action == 'check':
                 if Action.CHECK_CALL in raw_legal_actions:
                     return Action.CHECK_CALL
                 else:
-                    logger.warning(f"[GTO AGENT] CHECK_CALL not available! Legal actions: {raw_legal_actions}")
-                    logger.warning(f"[GTO AGENT] Using first legal action: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
             else:  # fold
                 if Action.FOLD in raw_legal_actions:
                     return Action.FOLD
                 else:
-                    logger.warning(f"[GTO AGENT] FOLD not available! Legal actions: {raw_legal_actions}")
-                    logger.warning(f"[GTO AGENT] Using first legal action: {raw_legal_actions[0]}")
                     return raw_legal_actions[0]
     
     def eval_step(self, state):

@@ -5,9 +5,8 @@ Single source of truth for action labeling logic used by frontend, backend, and 
 Consolidates context detection and label generation to ensure 100% consistency.
 """
 
-import logging
+# logging removed
 
-logger = logging.getLogger(__name__)
 
 
 class ActionLabeling:

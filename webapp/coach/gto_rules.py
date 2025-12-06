@@ -84,26 +84,165 @@ class GTORules:
             '62o': 'fold',
         }
         
-        # Big blind defending range (~60-65% vs button open for 100+ BB)
+        # Big blind defending range vs 3BB raise (100+ BB stack depth)
+        # Based on GTO optimal ranges for heads-up No Limit Hold'em
+        # Format: 'raise' = 100% raise, 'call' = 100% call, frequency (0.0-1.0) = raise frequency
         self.bb_defending_range_100bb = {
-            # Defend with most pairs, suited hands, and high cards
+            # Pocket Pairs (22-AA)
             'AA': 'raise', 'KK': 'raise', 'QQ': 'raise', 'JJ': 'raise',
-            'TT': 'raise', '99': 'raise', '88': 'raise', '77': 'raise',
-            '66': 'raise', '55': 'raise', '44': 'raise', '33': 'raise', '22': 'raise',
-            'AKs': 'raise', 'AKo': 'raise',
-            'AQs': 'raise', 'AQo': 'raise',
-            'AJs': 'raise', 'AJo': 'raise',
-            'ATs': 'raise', 'ATo': 'raise',
-            'A9s': 'call', 'A8s': 'call', 'A7s': 'call', 'A6s': 'call', 'A5s': 'call',
-            'A4s': 'call', 'A3s': 'call', 'A2s': 'call',
-            'KQs': 'raise', 'KQo': 'call',
-            'KJs': 'call', 'KJo': 'call',
-            'KTs': 'call', 'K9s': 'call',
-            'QJs': 'call', 'QJo': 'call',
-            'QTs': 'call', 'Q9s': 'call',
-            'JTs': 'call', 'J9s': 'call',
-            'T9s': 'call', '98s': 'call', '87s': 'call',
-            '76s': 'call', '65s': 'call', '54s': 'call',
+            'TT': 'raise', '99': 'raise', '88': 'raise',
+            '77': 0.5, '66': 0.5, '55': 0.5, '44': 0.5, '33': 0.5,  # 50% raise, 50% call
+            '22': 'call',
+            
+            # Ace-x Suited
+            'AKs': 'raise', 'AQs': 'raise', 'AJs': 'raise', 'ATs': 'raise',
+            'A9s': 'raise', 'A8s': 'raise',
+            'A7s': 0.5,  # 50% raise, 50% call
+            'A6s': 'call', 'A5s': 'call', 'A4s': 'call', 'A3s': 'call',
+            'A2s': 0.5,  # 50% raise, 50% call
+            
+            # King-x Suited
+            'KQs': 'raise', 'KJs': 'raise', 'KTs': 'raise', 'K9s': 'raise',
+            'K8s': 'call',
+            'K7s': 0.5,  # 50% raise, 50% call
+            'K6s': 'raise',
+            'K5s': 0.6,  # 60% raise, 40% call
+            'K4s': 0.1,  # 10% raise, 90% call
+            'K3s': 'call', 'K2s': 'call',
+            
+            # Queen-x Suited
+            'QJs': 'raise', 'QTs': 'raise', 'Q9s': 'raise',
+            'Q8s': 0.5,  # 50% raise, 50% call
+            'Q7s': 'call',
+            'Q6s': 0.5,  # 50% raise, 50% call
+            'Q5s': 'call',
+            'Q4s': 0.1,  # 10% raise, 90% call
+            'Q3s': 'call', 'Q2s': 'call',
+            
+            # Jack-x Suited
+            'JTs': 'raise', 'J9s': 'raise',
+            'J8s': 0.5,  # 50% raise, 50% call
+            'J7s': 'call',
+            'J6s': 0.5,  # 50% raise, 50% call
+            'J5s': 'call',
+            'J4s': 0.1,  # 10% raise, 90% call
+            'J3s': 'call', 'J2s': 'call',
+            
+            # Ten-x Suited
+            'T9s': 'raise',
+            'T8s': 0.5,  # 50% raise, 50% call
+            'T7s': 'call',
+            'T6s': 0.5,  # 50% raise, 50% call
+            'T5s': 'call',
+            'T4s': 0.1,  # 10% raise, 90% call
+            'T3s': 'call', 'T2s': 'call',
+            
+            # Nine-x Suited
+            '98s': 'raise', '97s': 'raise', '96s': 'raise',
+            '95s': 0.5,  # 50% raise, 50% call
+            '94s': 0.1,  # 10% raise, 90% call
+            '93s': 0.1,  # 10% raise, 90% call
+            '92s': 'call',
+            
+            # Eight-x Suited
+            '87s': 'raise', '86s': 'raise',
+            '85s': 0.5,  # 50% raise, 50% call
+            '84s': 0.1,  # 10% raise, 90% call
+            '83s': 0.1,  # 10% raise, 90% call
+            '82s': 'fold',  # 100% fold
+            
+            # Seven-x Suited
+            '76s': 'raise', '75s': 'raise',
+            '74s': 0.1,  # 10% raise, 90% call
+            '73s': 0.1,  # 10% raise, 90% call
+            '72s': 'fold',  # 100% fold
+            
+            # Six-x Suited
+            '65s': 'raise',
+            '64s': 0.1,  # 10% raise, 90% call
+            '63s': 0.1,  # 10% raise, 90% call
+            '62s': 'fold',  # 100% fold
+            
+            # Five-x Suited
+            '54s': 'raise',
+            '53s': 0.1,  # 10% raise, 90% call
+            '52s': 'call',
+            
+            # Four-x and Three-x Suited
+            '43s': 'raise',
+            '42s': 'call',
+            '32s': 'call',
+            
+            # Ace-x Offsuit
+            'AKo': 'raise', 'AQo': 'raise',
+            'AJo': 0.5,  # 50% raise, 50% call
+            'ATo': 0.5,  # 50% raise, 50% call
+            'A9o': 'call',
+            'A8o': 0.5,  # 50% raise, 50% call
+            'A7o': 'call', 'A6o': 'call', 'A5o': 'call',
+            'A4o': 'call', 'A3o': 'call', 'A2o': 'call',
+            
+            # King-x Offsuit
+            'KQo': 'raise',
+            'KJo': 0.5,  # 50% raise, 50% call
+            'KTo': 0.3,  # 30% raise, 70% call
+            'K9o': 0.5,  # 50% raise, 50% call
+            'K8o': 0.5,  # 50% raise, 50% call
+            'K7o': 0.5,  # 50% raise, 50% call
+            'K6o': 0.5,  # 50% raise, 50% call
+            'K5o': 'call', 'K4o': 'call',
+            'K3o': 'fold', 'K2o': 'fold',  # 100% fold
+            
+            # Queen-x Offsuit
+            'QJo': 0.5,  # 50% raise, 50% call
+            'QTo': 0.5,  # 50% raise, 50% call
+            'Q9o': 0.5,  # 50% raise, 50% call
+            'Q8o': 0.5,  # 50% raise, 50% call
+            'Q7o': 'call',
+            'Q6o': 0.0,  # 50% call, 50% fold (special case - no raise option, using 0.0 to always call)
+            'Q5o': 'fold', 'Q4o': 'fold', 'Q3o': 'fold', 'Q2o': 'fold',  # 100% fold
+            
+            # Jack-x Offsuit
+            'JTo': 0.5,  # 50% raise, 50% call
+            'J9o': 0.5,  # 50% raise, 50% call
+            'J8o': 0.5,  # 50% raise, 50% call
+            'J7o': 0.5,  # 50% raise, 50% call
+            'J6o': 'fold', 'J5o': 'fold', 'J4o': 'fold', 'J3o': 'fold', 'J2o': 'fold',  # 100% fold
+            
+            # Ten-x Offsuit
+            'T9o': 0.5,  # 50% raise, 50% call
+            'T8o': 0.5,  # 50% raise, 50% call
+            'T7o': 0.5,  # 50% raise, 50% call
+            'T6o': 'fold', 'T5o': 'fold', 'T4o': 'fold', 'T3o': 'fold', 'T2o': 'fold',  # 100% fold
+            
+            # Nine-x Offsuit
+            '98o': 0.5,  # 50% raise, 50% call
+            '97o': 0.5,  # 50% raise, 50% call
+            '96o': 0.5,  # 50% raise, 50% call
+            '95o': 'call',
+            '94o': 'fold', '93o': 'fold', '92o': 'fold',  # 100% fold
+            
+            # Eight-x Offsuit
+            '87o': 0.5,  # 50% raise, 50% call
+            '86o': 0.5,  # 50% raise, 50% call
+            '85o': 'fold', '84o': 'fold', '83o': 'fold', '82o': 'fold',  # 100% fold
+            
+            # Seven-x Offsuit
+            '76o': 0.5,  # 50% raise, 50% call
+            '75o': 'fold', '74o': 'fold', '73o': 'fold', '72o': 'fold',  # 100% fold
+            
+            # Six-x Offsuit
+            '65o': 0.0,  # 50% call, 50% fold (special case - no raise option, using 0.0 to always call)
+            '64o': 'call', '63o': 'call',
+            '62o': 'fold',  # 100% fold
+            
+            # Five-x Offsuit
+            '54o': 'fold',  # 100% fold
+            '53o': 'call',
+            '52o': 'fold',  # 100% fold
+            
+            # Four-x and Three-x Offsuit
+            '43o': 'fold', '42o': 'fold', '32o': 'fold',  # 100% fold
         }
         
         # Button 3-bet range (~10-12% vs big blind for 100+ BB)
@@ -492,11 +631,9 @@ class GTORules:
         Returns:
             dict: Range dictionary
         """
-        import logging
-        logger = logging.getLogger(__name__)
+        # logging removed
         
         category = self._get_stack_depth_category(stack_depth)
-        logger.debug(f"[GTO RULES] _get_range_for_stack_depth called - position={position}, action_type={action_type}, stack_depth={stack_depth:.1f}, category={category}")
         
         if position == 'button':
             if action_type == 'open':
@@ -528,40 +665,29 @@ class GTORules:
                     return self.button_4bet_range_100bb
         elif position == 'big_blind':
             if action_type == 'open':
-                logger.debug(f"[GTO RULES] Returning bb_opening_range (very tight, all 'raise')")
                 return self.bb_opening_range
             elif action_type == 'defend':
                 if category == '20_30':
-                    logger.debug(f"[GTO RULES] Returning bb_defending_range_20_30bb (has 'call' entries)")
                     return self.bb_defending_range_20_30bb
                 elif category == '50':
-                    logger.debug(f"[GTO RULES] Returning bb_defending_range_50bb (has 'call' entries)")
                     return self.bb_defending_range_50bb
                 else:  # 100+
-                    logger.debug(f"[GTO RULES] Returning bb_defending_range_100bb (has 'call' entries - this is the correct range for facing button open!)")
                     return self.bb_defending_range_100bb
             elif action_type == '3bet':
                 if category == '20_30':
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_3bet_range_20_30bb (mostly 'raise', few/no 'call' entries)")
                     return self.bb_3bet_range_20_30bb
                 elif category == '50':
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_3bet_range_50bb (mostly 'raise', few/no 'call' entries)")
                     return self.bb_3bet_range_50bb
                 else:  # 100+
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_3bet_range_100bb (mostly 'raise', few/no 'call' entries - if action_type should be 'defend', this is wrong!)")
                     return self.bb_3bet_range_100bb
             elif action_type == '4bet':
                 if category == '20_30':
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_4bet_range_20_30bb (all 'raise', no 'call' entries)")
                     return self.bb_4bet_range_20_30bb
                 elif category == '50':
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_4bet_range_50bb (all 'raise', no 'call' entries)")
                     return self.bb_4bet_range_50bb
                 else:  # 100+
-                    logger.warning(f"[GTO RULES] ⚠️ Returning bb_4bet_range_100bb (all 'raise', no 'call' entries - if action_type should be 'defend', this is wrong!)")
                     return self.bb_4bet_range_100bb
         
-        logger.error(f"[GTO RULES] No range found for position={position}, action_type={action_type}, category={category}, returning empty dict")
         return {}
     
     def _get_allin_range(self, stack_depth):
@@ -628,8 +754,7 @@ class GTORules:
             range_dict = self._get_range_for_stack_depth(position, action_type, stack_depth)
             
             # DEBUG: Log range lookup with statistics
-            import logging
-            logger = logging.getLogger(__name__)
+            # logging removed
             range_size = len(range_dict) if range_dict else 0
             
             # Count action types in range for debugging
@@ -638,60 +763,38 @@ class GTORules:
             fold_count = sum(1 for v in range_dict.values() if v == 'fold')
             freq_count = sum(1 for v in range_dict.values() if isinstance(v, (int, float)) and 0.0 < v <= 1.0)
             
-            logger.debug(f"[GTO RULES] ===== RANGE LOOKUP =====")
-            logger.debug(f"[GTO RULES] Position: {position}, Action type: {action_type}, Stack depth: {stack_depth}")
-            logger.debug(f"[GTO RULES] Range size: {range_size} hands")
-            logger.debug(f"[GTO RULES] Range composition - Raise: {raise_count}, Call: {call_count}, Fold: {fold_count}, Frequency: {freq_count}")
-            logger.debug(f"[GTO RULES] Looking up hand: {hand}")
             
             if not range_dict:
-                logger.warning(f"[GTO RULES] No range found for {position}/{action_type}/{stack_depth}, returning 'fold'")
-                logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: FOLD (no range) =====")
                 return 'fold'
             
             action_value = range_dict.get(hand, 'fold')
-            logger.debug(f"[GTO RULES] Hand {hand} lookup result: {action_value} (type: {type(action_value).__name__})")
 
             if hand not in range_dict:
-                logger.debug(f"[GTO RULES] Hand {hand} NOT in range, defaulting to 'fold'")
-                logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: FOLD (not in range) =====")
                 return 'fold'
             
             # Handle frequency-based actions (mixed strategies)
             if isinstance(action_value, (int, float)) and 0.0 < action_value <= 1.0:
                 # This is a frequency (e.g., 0.7 means raise 70% of the time)
-                logger.debug(f"[GTO RULES] Frequency-based action: {action_value} ({action_value*100:.1f}% to raise)")
                 if use_frequency:
                     # Use random selection based on frequency
                     # Import random at module level to ensure proper state management
                     import random
                     # Generate random number for frequency-based decision
                     rand_val = random.random()
-                    logger.debug(f"[GTO RULES] Random value: {rand_val:.3f}, threshold: {action_value:.3f}")
                     if rand_val < action_value:
-                        logger.debug(f"[GTO RULES] Frequency check passed: returning 'raise'")
-                        logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: RAISE (frequency) =====")
                         return 'raise'
                     else:
                         # If not raising, default to fold for 3bet/4bet scenarios
                         # or call for defend scenarios
                         if action_type == 'defend':
-                            logger.debug(f"[GTO RULES] Frequency check failed (defend): returning 'call'")
-                            logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: CALL (frequency) =====")
                             return 'call'
                         else:
-                            logger.debug(f"[GTO RULES] Frequency check failed ({action_type}): returning 'fold'")
-                            logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: FOLD (frequency) =====")
                             return 'fold'
                 else:
                     # Return the frequency value for caller to handle
-                    logger.debug(f"[GTO RULES] use_frequency=False, returning frequency value: {action_value}")
-                    logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: FREQUENCY VALUE =====")
                     return action_value
             
             # Handle string actions ('raise', 'call', 'fold')
-            logger.debug(f"[GTO RULES] String action: returning '{action_value}'")
-            logger.debug(f"[GTO RULES] ===== END RANGE LOOKUP: {action_value.upper()} =====")
             return action_value
         except Exception:
             # Error handling - default to fold

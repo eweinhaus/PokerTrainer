@@ -126,10 +126,10 @@ class TestChatbotCoach(unittest.TestCase):
             'current_player': 0
         }
         
-        context_text = coach._inject_context(game_context, "What should I do now?")
+        context_text = coach._inject_context(game_context, None, "What should I do now?")
         
         self.assertIsNotNone(context_text)
-        self.assertIn("Current Hand", context_text)
+        self.assertIn("Current Game State", context_text)
         self.assertIn("Board", context_text)
         self.assertIn("Pot", context_text)
         self.assertIn("Position", context_text)
@@ -151,11 +151,11 @@ class TestChatbotCoach(unittest.TestCase):
         }
         
         # Relevant question - should include context
-        context1 = coach._inject_context(game_context, "What should I do now?")
+        context1 = coach._inject_context(game_context, None, "What should I do now?")
         self.assertIsNotNone(context1)
-        
+
         # Not relevant question - should not include context
-        context2 = coach._inject_context(game_context, "What are pot odds?")
+        context2 = coach._inject_context(game_context, None, "What are pot odds?")
         self.assertIsNone(context2)
     
     @patch.dict(os.environ, {'OPENAI_API_KEY': 'test_key'})

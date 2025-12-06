@@ -10,7 +10,7 @@ Replaces GTOAgent functionality with LLM-powered decision making.
 
 import os
 import time
-import logging
+# logging removed
 import traceback
 import json
 import numpy as np
@@ -47,7 +47,6 @@ except (PermissionError, FileNotFoundError):
     pass
 
 # Configure logging
-logger = logging.getLogger(__name__)
 
 
 class LLMOpponentAgent:
@@ -98,7 +97,6 @@ class LLMOpponentAgent:
             with open(os.path.join(rlcard.__path__[0], 'games/limitholdem/card2index.json'), 'r') as file:
                 self.card2index = json.load(file)
         except Exception as e:
-            logger.warning(f"🃏 Could not load card2index mapping: {e}. Using fallback mapping.")
             # Fallback card2index mapping for basic poker cards
             # Format: [rank][suit] where rank: 2-9,T,J,Q,K,A and suit: S,H,D,C
             self.card2index = {}
@@ -131,7 +129,6 @@ class LLMOpponentAgent:
         # Validate provider choice and initialize appropriate client
         if llm_provider == "openrouter":
             if not openrouter_key or openrouter_key == "your_openrouter_key_here" or openrouter_key == "your_key_here":
-                logger.error("🔑 LLM_PROVIDER is set to 'openrouter' but OPEN_ROUTER_KEY is not configured or using placeholder.")
                 self.client = None
                 self.api_key_available = False
             else:
@@ -146,19 +143,15 @@ class LLMOpponentAgent:
                     self.use_openrouter = True
                     # Use a good default model for OpenRouter (GPT-4 Turbo)
                     self.model = "openai/gpt-4-turbo"
-                    logger.info("🚀 Initialized LLMOpponentAgent with OpenRouter provider")
                 except Exception as e:
-                    logger.error(f"❌ Failed to initialize OpenRouter client: {e}")
                     self.client = None
                     self.api_key_available = False
 
         elif llm_provider == "openai":
             if not OPENAI_AVAILABLE:
-                logger.error("OpenAI library not available. Cannot use OpenAI provider.")
                 self.client = None
                 self.api_key_available = False
             elif not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
-                logger.error("LLM_PROVIDER is set to 'openai' but OPENAI_API_KEY is not configured or using placeholder.")
                 self.client = None
                 self.api_key_available = False
             else:
@@ -169,14 +162,11 @@ class LLMOpponentAgent:
                     )
                     self.api_key_available = True
                     self.model = "gpt-4-turbo-preview"
-                    logger.info("Initialized LLMOpponentAgent with OpenAI provider")
                 except Exception as e:
-                    logger.error(f"Failed to initialize OpenAI client: {e}")
                     self.client = None
                     self.api_key_available = False
 
         else:
-            logger.error(f"Invalid LLM_PROVIDER '{llm_provider}'. Must be 'openai' or 'openrouter'. Defaulting to OpenAI.")
             # Try OpenAI as fallback
             if openai_key and openai_key != "your_openai_api_key_here" and openai_key != "your_key_here":
                 try:
@@ -187,13 +177,10 @@ class LLMOpponentAgent:
                     self.api_key_available = True
                     self.model = "gpt-4-turbo-preview"
                     self.llm_provider = "openai"
-                    logger.info("Invalid LLM_PROVIDER specified, fell back to OpenAI")
                 except Exception as e:
-                    logger.error(f"Failed to initialize OpenAI client as fallback: {e}")
                     self.client = None
                     self.api_key_available = False
             else:
-                logger.warning("LLM_PROVIDER invalid and no valid OpenAI key available. LLM opponent will use GTOAgent fallback.")
                 self.client = None
                 self.api_key_available = False
     
@@ -289,7 +276,6 @@ class LLMOpponentAgent:
         hand = raw_obs.get('hand', [])
 
         if not hand or len(hand) != 2:
-            logger.warning(f"Could not extract opponent cards from state - hand: {hand}, length: {len(hand) if hand else 0}")
             return None
 
         # Convert cards to integers - handle both string representations (e.g., 'ST', 'DQ')
@@ -302,13 +288,11 @@ class LLMOpponentAgent:
                     if card in self.card2index:
                         hand_ints.append(self.card2index[card])
                     else:
-                        logger.warning(f"Unknown card string '{card}' not found in card2index mapping")
                         return None
                 else:
                     # Card is already an integer or can be converted to int
                     hand_ints.append(int(card))
             except (ValueError, TypeError, KeyError) as e:
-                logger.error(f"Could not convert card {card} to integer: {e}")
                 return None
 
         return hand_ints
@@ -372,7 +356,6 @@ class LLMOpponentAgent:
             
             return f"{rank_names[rank]}{suit_names[suit]}"
         except (ValueError, IndexError) as e:
-            logger.error(f"❌ [LLM_AGENT] Error converting card_index {card_index} to string: {e}")
             raise
     
     def step(self, state):
@@ -386,17 +369,13 @@ class LLMOpponentAgent:
             action: Action enum value (Action.FOLD, Action.CHECK_CALL, etc.)
         """
         raw_legal_actions = state.get('raw_legal_actions', [])
-        logger.info(f"🔍 [LLM_AGENT] step() called with raw_legal_actions: {raw_legal_actions}")
-        logger.info(f"🔍 [LLM_AGENT] Full state raw_obs: {state.get('raw_obs', {})}")
 
         if not raw_legal_actions:
             # No legal actions - shouldn't happen
-            logger.error(f"❌ [LLM_AGENT] No legal actions found in state!")
             return Action.FOLD
 
         # Check if LLM is available
         if not self.api_key_available or not self.client:
-            logger.warning("LLM not available, using GTOAgent fallback")
             return self.gto_agent.step(state)
 
         # SPECIAL CASE: SB opening preflop - skip LLM and use GTO strategy directly
@@ -429,14 +408,51 @@ class LLMOpponentAgent:
                          (len(raised) < 2 or raised[1] <= big_blind * 1.1))
 
             if opponent_is_sb and is_opening:
-                logger.info(f"🎯 [LLM_AGENT] SB opening scenario detected - skipping LLM, using GTO strategy directly")
+                return self.gto_agent.step(state)
+
+            # SPECIAL CASE: BB facing 3BB raise preflop - skip LLM and use GTO strategy directly
+            # Determine if opponent is BB
+            dealer_id = state.get('dealer_id')
+            opponent_is_bb = False
+            if dealer_id is not None:
+                opponent_is_bb = (dealer_id == 1)  # If opponent is dealer (player 1), opponent is BB
+            else:
+                # Fallback: assume opponent is BB if no dealer_id (legacy behavior)
+                opponent_is_bb = True
+
+            # Check if facing a 3BB raise (button open)
+            raised = raw_obs.get('raised', [0, 0])
+            big_blind = raw_obs.get('big_blind', 2)
+            pot = raw_obs.get('pot', 0)
+            pot_bb = pot / big_blind if big_blind > 0 else 0
+            
+            # User is player 0, opponent is player 1
+            user_raised = raised[0] if len(raised) > 0 else 0
+            opponent_raised = raised[1] if len(raised) > 1 else 0
+            
+            # Detect 3BB raise: user raised to ~3BB total (2.5-3.5BB range)
+            user_raised_bb = user_raised / big_blind if big_blind > 0 else 0
+            facing_3bb_raise = (
+                opponent_is_bb and
+                user_raised_bb >= 2.5 and user_raised_bb <= 3.5 and  # User raised to ~3BB
+                opponent_raised <= big_blind * 1.1  # Opponent hasn't raised yet (just BB)
+            )
+            
+            # Alternative detection using pot size (more reliable when raised array is wrong)
+            # Pot after 3BB open = SB (0.5BB) + BB (1BB) + raise (2BB) = 3.5BB
+            pot_indicates_3bb_raise = (
+                opponent_is_bb and
+                pot_bb >= 3.0 and pot_bb <= 4.5 and  # Pot indicates 3BB open
+                opponent_raised <= big_blind * 1.1  # Opponent hasn't raised yet
+            )
+            
+            if facing_3bb_raise or pot_indicates_3bb_raise:
                 return self.gto_agent.step(state)
 
         try:
             # 1. Extract opponent cards
             opponent_cards = self._extract_opponent_cards(state)
             if not opponent_cards:
-                logger.warning("Could not extract opponent cards, using GTOAgent fallback")
                 return self.gto_agent.step(state)
             
             # 2. Build context
@@ -450,7 +466,6 @@ class LLMOpponentAgent:
             llm_action = self._call_llm_for_decision(context)
             
             if not llm_action:
-                logger.warning("LLM call failed, using GTOAgent fallback")
                 return self.gto_agent.step(state)
             
             # 5. Map LLM action to RLCard Action enum and validate
@@ -459,7 +474,6 @@ class LLMOpponentAgent:
             
             # 6. Check if action is illegal (shouldn't happen after mapping, but double-check)
             if action not in raw_legal_actions:
-                logger.warning(f"LLM selected illegal action {llm_action} (mapped to {action}), retrying with clarification...")
                 # Retry with clarification about legal actions
                 clarified_context = context.copy()
                 clarified_context['clarification'] = f"Previous action '{llm_action}' was not legal. Legal actions are: {[context['legal_actions_labels'].get(a, f'Action {a}') for a in raw_legal_actions]}"
@@ -468,17 +482,13 @@ class LLMOpponentAgent:
                 if retry_action:
                     action = self._map_llm_action_to_rlcard(retry_action, raw_legal_actions)
                     if action not in raw_legal_actions:
-                        logger.warning("LLM still selected illegal action after clarification, using GTOAgent fallback")
                         return self.gto_agent.step(state)
                 else:
-                    logger.warning("LLM call failed on retry, using GTOAgent fallback")
                     return self.gto_agent.step(state)
             
             return action
             
         except Exception as e:
-            logger.error(f"Error in LLMOpponentAgent.step(): {e}")
-            logger.error(traceback.format_exc())
             # Fallback to GTOAgent on any error
             return self.gto_agent.step(state)
     
@@ -511,15 +521,129 @@ class LLMOpponentAgent:
     def _build_action_history(self, state):
         """
         Build action history from game state.
-        Reconstructs all actions from start of current hand.
+        Uses actual action history if available, otherwise infers from raised amounts.
         
         Args:
-            state (dict): State dictionary with 'raw_obs'
+            state (dict): State dictionary with 'raw_obs' and optionally 'action_history_with_cards'
         
         Returns:
             list: List of action history entries
         """
         raw_obs = state.get('raw_obs', {})
+        
+        # FIRST: Try to use actual action history if available (preferred method)
+        if 'action_history_with_cards' in state:
+            action_history_with_cards = state['action_history_with_cards']
+            
+            # Convert game manager's action history format to LLM agent's expected format
+            converted_history = []
+            big_blind = raw_obs.get('big_blind', 2)
+            stakes = raw_obs.get('stakes', [100, 100])
+            
+            # Determine positions based on dealer_id
+            dealer_id = state.get('dealer_id')
+            if dealer_id is not None:
+                user_is_dealer = (dealer_id == 0)
+                if user_is_dealer:
+                    user_position = 'big_blind'
+                    opponent_position = 'button'
+                else:
+                    user_position = 'button'
+                    opponent_position = 'big_blind'
+            else:
+                user_position = 'button'
+                opponent_position = 'big_blind'
+            
+            for entry in action_history_with_cards:
+                entry_type = entry.get('type', '')
+                player_id = entry.get('player_id', -1)
+                player_name = entry.get('player_name', '')
+                
+                # Map player_id to 'user' or 'opponent'
+                if player_id == 0:
+                    player = 'user'
+                    position = user_position
+                elif player_id == 1:
+                    player = 'opponent'
+                    position = opponent_position
+                else:
+                    continue  # Skip invalid entries
+                
+                # Convert blind entries
+                if entry_type == 'blind':
+                    blind_type = entry.get('blind_type', '')
+                    amount = entry.get('amount', 0)
+                    amount_bb = amount / big_blind if big_blind > 0 else 0
+                    
+                    converted_history.append({
+                        'player': player,
+                        'position': 'button' if blind_type == 'small' else 'big_blind',
+                        'action': 'blind',
+                        'bet_size_chips': amount,
+                        'bet_size_bb': amount_bb,
+                        'pot_before': 0 if blind_type == 'small' else big_blind // 2,
+                        'pot_after': big_blind + (big_blind // 2) if blind_type == 'big' else big_blind // 2,
+                        'stack_before': {'user': stakes[0] + amount if player == 'user' else stakes[0],
+                                        'opponent': stakes[1] + amount if player == 'opponent' else stakes[1]},
+                        'stack_after': {'user': stakes[0] if player == 'user' else stakes[0],
+                                       'opponent': stakes[1] if player == 'opponent' else stakes[1]},
+                        'stage': 'preflop',
+                        'action_label': f'{blind_type.capitalize()} Blind {amount} chips'
+                    })
+                
+                # Convert action entries
+                elif entry_type == 'action':
+                    action_name = entry.get('action', '')
+                    bet_amount = entry.get('bet_amount', 0)
+                    
+                    # Determine stage from action name or use current stage
+                    stage_name = 'preflop'  # Default
+                    if 'Flop' in action_name or 'flop' in action_name.lower():
+                        stage_name = 'flop'
+                    elif 'Turn' in action_name or 'turn' in action_name.lower():
+                        stage_name = 'turn'
+                    elif 'River' in action_name or 'river' in action_name.lower():
+                        stage_name = 'river'
+                    
+                    # Determine action type from action name
+                    action_type = 'unknown'
+                    if 'Fold' in action_name or 'fold' in action_name.lower():
+                        action_type = 'fold'
+                    elif 'Check' in action_name or 'check' in action_name.lower():
+                        action_type = 'check'
+                    elif 'Call' in action_name or 'call' in action_name.lower():
+                        action_type = 'call'
+                    elif 'Raise' in action_name or 'raise' in action_name.lower() or 'bet' in action_name.lower():
+                        action_type = 'raise'
+                    elif 'All-In' in action_name or 'all-in' in action_name.lower():
+                        action_type = 'all_in'
+                    
+                    # Calculate bet size in BB
+                    bet_size_bb = bet_amount / big_blind if big_blind > 0 else 0
+                    
+                    # Get pot size (approximate from current pot)
+                    pot = raw_obs.get('pot', 0)
+                    
+                    converted_history.append({
+                        'player': player,
+                        'position': position,
+                        'action': action_type,
+                        'bet_size_chips': bet_amount,
+                        'bet_size_bb': bet_size_bb,
+                        'pot_before': pot - bet_amount if bet_amount > 0 else pot,
+                        'pot_after': pot,
+                        'stack_before': {'user': stakes[0] + bet_amount if player == 'user' else stakes[0],
+                                        'opponent': stakes[1] + bet_amount if player == 'opponent' else stakes[1]},
+                        'stack_after': {'user': stakes[0] if player == 'user' else stakes[0],
+                                       'opponent': stakes[1] if player == 'opponent' else stakes[1]},
+                        'stage': stage_name,
+                        'action_label': action_name
+                    })
+            
+            if converted_history:
+                return converted_history
+        
+        # FALLBACK: Infer action history from raised amounts (original logic)
         action_history = []
         
         # Get current game state info
@@ -686,7 +810,6 @@ class LLMOpponentAgent:
                         card_int = int(card)
                         opponent_cards_str.append(self._card_index_to_string(card_int))
                     except (ValueError, TypeError):
-                        logger.warning(f"Could not convert card {card} to string, skipping")
                         opponent_cards_str.append(str(card))
         else:
             opponent_cards_str = []
@@ -733,15 +856,14 @@ class LLMOpponentAgent:
                     card_int = int(card)
                     public_cards_str.append(self._card_index_to_string(card_int))
             except (ValueError, TypeError, IndexError) as e:
-                logger.error(f"❌ [LLM_AGENT] Failed to convert board card {card} (type: {type(card)}) to string: {e}")
                 # Don't silently default to Ace - log error and skip invalid card
                 continue
         
         # Log board cards for debugging
         if public_cards_str:
-            logger.info(f"🃏 [LLM_AGENT] Board cards: {public_cards_str} (from raw: {public_cards})")
+            pass
         else:
-            logger.warning(f"⚠️ [LLM_AGENT] No valid board cards found (raw: {public_cards})")
+            pass
         
         # Get pot and stack info
         pot = raw_obs.get('pot', 0)
@@ -762,7 +884,6 @@ class LLMOpponentAgent:
         if raised_is_default:  # raised is default [0,0], so use stakes as raised
             # Use stakes as the raised amounts (total bets so far)
             raised = stakes[:]
-            logger.debug(f"🔧 [LLM_AGENT] Using stakes as raised: stakes={stakes}, raised={raised}")
         
         pot_size_bb = pot / big_blind if big_blind > 0 else 0
         # Player 0 is user (button), Player 1 is opponent (big blind)
@@ -819,7 +940,6 @@ class LLMOpponentAgent:
                     'stage': 'preflop',
                     'action_label': f'Raise to {bet_size_bb:.1f}BB'
                 })
-                logger.info(f"🔧 [LLM_AGENT] Added missing raise to action history: {bet_size_bb:.1f}BB")
         
         # Calculate pot odds if facing a bet
         pot_odds = 0.0
@@ -853,7 +973,6 @@ class LLMOpponentAgent:
                     legal_actions_labels[action] = f'Action {action}'
         except Exception as e:
             # Fallback to original logic if ActionLabeling fails
-            logger.warning(f"Error using ActionLabeling in LLM opponent, using fallback: {e}")
             legal_actions_labels = {}
             action_label_map = {
                 Action.FOLD: 'Fold',
@@ -908,7 +1027,6 @@ class LLMOpponentAgent:
                         stage
                     )
                 except Exception as e:
-                    logger.warning(f"Could not calculate hand equity: {e}")
                     # Fallback to hand strength estimate
                     hand_strength = self.equity_calculator.categorize_hand_strength(
                         opponent_cards, public_cards, stage
@@ -919,8 +1037,8 @@ class LLMOpponentAgent:
             if stage > 0 and public_cards:
                 board_texture = self.equity_calculator._analyze_board_texture(public_cards)
         except Exception as e:
-            logger.warning(f"Error in pre-calculated analysis: {e}")
             # Continue without pre-calculated values
+            pass
         
         # Determine positions based on dealer_id (for heads-up poker)
         dealer_id = state.get('dealer_id')
@@ -1213,28 +1331,20 @@ class LLMOpponentAgent:
                             action_type = arguments.get("action_type")
                             reasoning = arguments.get("reasoning", "")
                             
-                            logger.info(f"LLM reasoning: {reasoning}")
-                            logger.info(f"LLM selected action: {action_type}")
                             return action_type
                 
-                logger.warning("LLM response did not contain valid tool call")
                 return None
                 
             except FutureTimeoutError:
-                logger.warning(f"LLM API call timed out after {self.executor_timeout} seconds")
                 if retry_count < max_retries:
                     delay = backoff_delays[retry_count] if retry_count < len(backoff_delays) else 2
-                    logger.info(f"Retrying LLM call (attempt {retry_count + 1}/{max_retries}) after {delay}s delay...")
                     time.sleep(delay)
                     return self._call_llm_for_decision(context, retry_count + 1)
                 return None
                 
         except Exception as e:
-            logger.error(f"Error calling LLM API: {e}")
-            logger.error(traceback.format_exc())
             if retry_count < max_retries:
                 delay = backoff_delays[retry_count] if retry_count < len(backoff_delays) else 2
-                logger.info(f"Retrying LLM call (attempt {retry_count + 1}/{max_retries}) after {delay}s delay...")
                 time.sleep(delay)
                 return self._call_llm_for_decision(context, retry_count + 1)
             return None
@@ -1268,10 +1378,9 @@ class LLMOpponentAgent:
                     label_normalized = normalize_label(label)
                     if label_normalized == llm_action_normalized:
                         if action in legal_actions:
-                            logger.info(f"Mapped LLM action '{llm_action}' to Action enum {action} via label '{label}'")
                             return action
                         else:
-                            logger.warning(f"LLM selected '{llm_action}' which maps to {action}, but it's not in legal_actions")
+                            pass
             
             # If exact match failed, try partial matching for common patterns
             # This handles cases where LLM might return slightly different formatting
@@ -1288,7 +1397,6 @@ class LLMOpponentAgent:
                         common_words = llm_words.intersection(label_words)
                         if len(common_words) >= 2:  # At least 2 words match
                             if action in legal_actions:
-                                logger.info(f"Mapped LLM action '{llm_action}' to Action enum {action} via partial label match '{label}'")
                                 return action
         
         # Fallback: try generic action type mapping (for backward compatibility)
@@ -1313,25 +1421,19 @@ class LLMOpponentAgent:
             # 1. If raise_half_pot illegal but raise_pot legal → use raise_pot
             if llm_action.lower() in ["raise_half_pot", "raise to 3 bb", "3-bet to 10 bb", "4-bet to 25 bb", "bet ½ pot"]:
                 if Action.RAISE_POT in legal_actions:
-                    logger.info(f"LLM selected {llm_action} but RAISE_HALF_POT illegal, using RAISE_POT instead")
                     return Action.RAISE_POT
                 elif Action.RAISE_HALF_POT in legal_actions:
-                    logger.info(f"LLM selected {llm_action}, using RAISE_HALF_POT")
                     return Action.RAISE_HALF_POT
             # 2. If raise_pot illegal but raise_half_pot legal → use raise_half_pot
             elif llm_action.lower() in ["raise_pot", "raise pot", "bet ⅔ pot"]:
                 if Action.RAISE_HALF_POT in legal_actions:
-                    logger.info(f"LLM selected {llm_action} but RAISE_POT illegal, using RAISE_HALF_POT instead")
                     return Action.RAISE_HALF_POT
                 elif Action.RAISE_POT in legal_actions:
-                    logger.info(f"LLM selected {llm_action}, using RAISE_POT")
                     return Action.RAISE_POT
             # 3. If call/check illegal but CHECK_CALL legal → use CHECK_CALL (shouldn't happen, but safe)
             elif llm_action.lower() in ["call", "check"] and Action.CHECK_CALL in legal_actions:
-                logger.info(f"LLM selected {llm_action}, using CHECK_CALL")
                 return Action.CHECK_CALL
         
         # Last resort: return first legal action
-        logger.warning(f"LLM selected action '{llm_action}' which couldn't be mapped, using first legal action: {legal_actions[0]}")
         return legal_actions[0]
 

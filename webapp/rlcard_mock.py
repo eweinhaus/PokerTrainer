@@ -36,7 +36,8 @@ class MockEnvironment:
         self.game = MockGame()
         self.game_state = {
             'stage': 0,  # Preflop
-            'pot': 1.5,  # SB + BB in BB units
+            'pot': 3,  # SB + BB in chip units (1 + 2)
+            'big_blind': 2,
             'public_cards': [],
             'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
             'raised': [1, 2],  # SB: 1, BB: 2
@@ -51,7 +52,8 @@ class MockEnvironment:
         """Reset the game and return initial state"""
         self.game_state = {
             'stage': 0,  # Preflop
-            'pot': 1.5,  # SB + BB in BB units
+            'pot': 3,  # SB + BB in chip units (1 + 2)
+            'big_blind': 2,
             'public_cards': [],
             'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
             'raised': [1, 2],  # SB: 1, BB: 2
@@ -82,29 +84,54 @@ class MockEnvironment:
         current_player = self.game_state['current_player']
         opponent = 1 - current_player
 
+        # Store previous bet amount for this player
+        previous_bet = self.game_state['raised'][current_player]
+
         # Update raised amounts based on action
         if action == Action.CHECK_CALL:
             # Match opponent's bet
             self.game_state['raised'][current_player] = self.game_state['raised'][opponent]
         elif action == Action.RAISE_HALF_POT:
-            # Raise by half pot
-            raise_amount = self.game_state['pot'] // 2
-            self.game_state['raised'][current_player] = self.game_state['raised'][opponent] + raise_amount
+            # Preflop: Raise to 3 BB total (standard button open)
+            # Postflop: Raise by half pot
+            if self.game_state.get('stage', 0) == 0:  # Preflop
+                big_blind = self.game_state.get('big_blind', 2)
+                # Raise to 3 BB total
+                self.game_state['raised'][current_player] = 3 * big_blind
+            else:  # Postflop
+                # Raise by half pot
+                raise_amount = self.game_state['pot'] // 2
+                self.game_state['raised'][current_player] = self.game_state['raised'][opponent] + raise_amount
         elif action == Action.RAISE_POT:
-            # Raise by full pot
-            raise_amount = self.game_state['pot']
-            self.game_state['raised'][current_player] = self.game_state['raised'][opponent] + raise_amount
+            # Preflop: 3-bet to 10 BB total (facing button open)
+            # Postflop: Raise by full pot
+            if self.game_state.get('stage', 0) == 0:  # Preflop
+                big_blind = self.game_state.get('big_blind', 2)
+                # 3-bet to 10 BB total
+                self.game_state['raised'][current_player] = 10 * big_blind
+            else:  # Postflop
+                # Raise by full pot
+                raise_amount = self.game_state['pot']
+                self.game_state['raised'][current_player] = self.game_state['raised'][opponent] + raise_amount
         elif action == Action.ALL_IN:
             # All in
             self.game_state['raised'][current_player] = self.game_state['all_chips'][current_player]
+
+        # Calculate how much this player added to their bet
+        bet_amount = self.game_state['raised'][current_player] - previous_bet
 
         # Update player in_chips
         for i, player in enumerate(self.game.players):
             player.in_chips = self.game_state['raised'][i]
 
-        # Update pot in BB units
-        big_blind = self.game_state.get('big_blind', 2)
-        self.game_state['pot'] = sum(self.game_state['raised']) / big_blind
+        # Update pot cumulatively in chip units (not BB units)
+        # Pot should accumulate across all betting rounds
+        if 'cumulative_pot' not in self.game_state:
+            self.game_state['cumulative_pot'] = self.game_state.get('pot', 0)
+
+        # Add the additional bet amount to cumulative pot
+        self.game_state['cumulative_pot'] += bet_amount
+        self.game_state['pot'] = self.game_state['cumulative_pot']
 
         # Switch to next player
         self.game_state['current_player'] = opponent

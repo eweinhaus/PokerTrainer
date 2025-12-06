@@ -1261,16 +1261,14 @@ class StrategyEvaluator:
                     decision_count += 1
                 except Exception as e:
                     # Skip decisions that can't be evaluated
-                    import logging
-                    logger = logging.getLogger(__name__)
+                    # logging removed
                     # Safely format error message to avoid string formatting issues
                     try:
                         error_msg = str(e)
                         # Escape format specifiers to prevent formatting errors
                         error_msg = error_msg.replace('%', '%%').replace('{', '{{').replace('}', '}}')
-                        logger.warning("⚠️ Error evaluating decision {}: {}".format(i, error_msg))
                     except Exception:
-                        logger.warning("⚠️ Error evaluating decision {}: Unknown error".format(i))
+                        pass
                     continue
         
         # Calculate overall grade (Phase 4 enhanced with weighting)
@@ -1328,13 +1326,11 @@ class StrategyEvaluator:
             session_id: Session ID
             hand_history_storage: Hand history storage
         """
-        import logging
-        logger = logging.getLogger(__name__)
+        # logging removed
         
         try:
             # Check if API keys are available before attempting LLM calls
             if not self.chatbot_coach.api_key_available or not self.chatbot_coach.client:
-                logger.info("🔑 API keys not available - skipping LLM enhancements")
                 # Mark as ready immediately with API unavailable flag
                 self.async_results[analysis_id] = {
                     'llm_insights': [],
@@ -1359,9 +1355,8 @@ class StrategyEvaluator:
             try:
                 llm_insights = self.chatbot_coach.generate_hand_insights(initial_analysis, game_state)
                 enhanced_content['llm_insights'] = llm_insights
-                logger.debug(f"🤖 Generated {len(llm_insights)} LLM insights")
             except Exception as e:
-                logger.warning(f"⚠️ Error generating LLM insights: {e}")
+                pass
             
             # 2. Enhance explanations for each decision
             try:
@@ -1380,9 +1375,8 @@ class StrategyEvaluator:
                     )
                     enhanced_explanations[i] = enhanced_explanation
                 enhanced_content['enhanced_explanations'] = enhanced_explanations
-                logger.debug(f"✨ Enhanced {len(enhanced_explanations)} explanations")
             except Exception as e:
-                logger.warning(f"⚠️ Error enhancing explanations: {e}")
+                pass
             
             # 3. Pattern recognition
             try:
@@ -1395,9 +1389,8 @@ class StrategyEvaluator:
                             recent_hands, initial_analysis
                         )
                         enhanced_content['pattern_insights'] = pattern_insights
-                        logger.debug(f"🔍 Generated {len(pattern_insights)} pattern insights")
             except Exception as e:
-                logger.warning(f"⚠️ Error analyzing patterns: {e}")
+                pass
             
             # 4. Generate LLM-powered learning points
             try:
@@ -1406,21 +1399,17 @@ class StrategyEvaluator:
                     initial_analysis, pattern_insights
                 )
                 enhanced_content['llm_learning_points'] = llm_learning_points
-                logger.debug(f"📚 Generated {len(llm_learning_points)} LLM learning points")
             except Exception as e:
-                logger.warning(f"⚠️ Error generating LLM learning points: {e}")
+                pass
             
             # Mark as ready
             enhanced_content['ready'] = True
             
             # Store results
             self.async_results[analysis_id] = enhanced_content
-            logger.info(f"✅ Async LLM enhancements completed for analysis_id: {analysis_id}")
             
         except Exception as e:
-            logger.error(f"❌ Error in async LLM enhancements: {e}")
             import traceback
-            logger.error(traceback.format_exc())
             # Store empty result to indicate failure
             self.async_results[analysis_id] = {
                 'llm_insights': [],

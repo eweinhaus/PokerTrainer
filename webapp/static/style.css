@@ -1502,6 +1502,7 @@ a:focus-visible {
     background: rgba(45, 90, 71, 0.6);
     align-self: flex-start;
     border-bottom-left-radius: var(--radius-sm);
+    font-size: 0.9em;
 }
 
 @keyframes messageSlideIn {

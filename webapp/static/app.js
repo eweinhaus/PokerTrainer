@@ -83,7 +83,6 @@ class PokerGame {
             btn.addEventListener('click', (e) => {
                 const actionValue = parseInt(e.target.dataset.action);
                 const buttonText = e.target.textContent.trim();
-                console.log(`🎯 [FRONTEND] Button clicked - Action Value: ${actionValue}, Button Text: "${buttonText}", Session: ${this.sessionId}`);
                 this.handleAction(actionValue);
             });
         });
@@ -170,46 +169,39 @@ class PokerGame {
 
             // If it's AI's turn, process it automatically
             if (!this.gameState.is_over && this.gameState.current_player === 1) {
-                console.log('Game started with AI turn - triggering processAITurn');
                 // Use setTimeout to ensure isProcessing flag is fully reset
                 setTimeout(() => {
                     this.processAITurn();
                 }, 100);
             }
         } catch (error) {
-            console.error('Error starting game:', error);
             this.updateStatus('Error starting game. Please try again.');
             this.isProcessing = false;
         }
     }
 
     async handleAction(actionValue) {
-        console.log(`🔄 [FRONTEND] handleAction called - Action Value: ${actionValue}, Session: ${this.sessionId}, Game State: ${this.gameState ? 'Available' : 'Missing'}`);
 
         // Edge case: Already processing
         if (this.isProcessing) {
-            console.log(`⚠️ [FRONTEND] Action blocked - Already processing another action`);
             this.showNotification('Please wait for current action to complete', 'warning');
             return;
         }
 
         // Edge case: No game state
         if (!this.gameState) {
-            console.log(`❌ [FRONTEND] Action blocked - No game state available`);
             this.showNotification('Game state not available. Please start a new game.', 'error');
             return;
         }
 
         // Edge case: Not waiting for action
         if (!this.gameState.is_waiting_for_action) {
-            console.log(`⚠️ [FRONTEND] Action blocked - Not waiting for action. Current player: ${this.gameState.current_player}, Waiting: ${this.gameState.is_waiting_for_action}`);
             this.showNotification('Not your turn yet', 'warning');
             return;
         }
 
         // Edge case: Game already over
         if (this.gameState.is_over) {
-            console.log(`⚠️ [FRONTEND] Action blocked - Game is already over`);
             this.showNotification('Game is already over', 'warning');
             return;
         }
@@ -218,14 +210,12 @@ class PokerGame {
         let isLegal = (this.gameState.legal_actions && this.gameState.legal_actions.includes(actionValue)) ||
                        (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.includes(actionValue));
 
-        console.log(`🔍 [FRONTEND] Action validation - Action: ${actionValue}, Legal Actions: ${JSON.stringify(this.gameState.legal_actions)}, Raw Legal Actions: ${JSON.stringify(this.gameState.raw_legal_actions)}, Is Legal: ${isLegal}`);
 
         // Special case: If RAISE_HALF_POT (2) is clicked but not legal, and RAISE_POT (3) is legal with same label,
         // use RAISE_POT instead (they do the same thing in this context)
         if (!isLegal && actionValue === 2) {
             const raisePotLegal = (this.gameState.legal_actions && this.gameState.legal_actions.includes(3)) ||
                                  (this.gameState.raw_legal_actions && this.gameState.raw_legal_actions.includes(3));
-            console.log(`🔄 [FRONTEND] RAISE_HALF_POT mapping check - Raise Pot (3) is legal: ${raisePotLegal}`);
             if (raisePotLegal) {
                 // Check if both buttons have the same label (they do the same thing)
                 // We need to recalculate button labels to check
@@ -254,13 +244,11 @@ class PokerGame {
         }
         
         if (!isLegal) {
-            console.log(`❌ [FRONTEND] Action rejected - Not legal: ${actionValue}`);
             this.updateStatus('Illegal action!');
             this.showNotification('Invalid action selected', 'error');
             return;
         }
 
-        console.log(`✅ [FRONTEND] Action approved - Sending to backend. Action: ${actionValue}, Session: ${this.sessionId}`);
 
         // Action value will be validated on the backend
 
@@ -276,7 +264,6 @@ class PokerGame {
                 setTimeout(() => playerSection.classList.remove('action-animating'), 1000);
             }
 
-            console.log(`📡 [FRONTEND] Making API call to /api/game/action with action_value: ${actionValue}`);
 
             const response = await fetch('/api/game/action', {
                 method: 'POST',
@@ -295,7 +282,6 @@ class PokerGame {
                 
                 // Check if it's a session not found error
                 if (response.status === 404 && errorMessage.includes('Game session not found')) {
-                    console.warn('Game session lost. Restarting game...');
                     this.showNotification('Game session expired. Starting new game...', 'warning', 5000);
                     // Restart the game automatically
                     await this.startNewGame();
@@ -333,8 +319,7 @@ class PokerGame {
                 this.updateActionButtons();
             }
         } catch (error) {
-            console.error('❌ [FRONTEND] Error processing action:', error);
-            console.error('❌ [FRONTEND] Error details:', {
+            console.error('Error processing action:', {
                 message: error.message,
                 stack: error.stack,
                 sessionId: this.sessionId,
@@ -361,27 +346,22 @@ class PokerGame {
     async processAITurn() {
         // Prevent duplicate calls
         if (this.isProcessing) {
-            console.log('processAITurn: Already processing, skipping');
             return;
         }
         
         // Double-check it's actually AI's turn
         if (!this.gameState) {
-            console.log('processAITurn: No game state available');
             return;
         }
         
         if (this.gameState.current_player !== 1) {
-            console.log('processAITurn: Not AI turn, current_player is', this.gameState.current_player);
             return;
         }
         
         if (this.gameState.is_over) {
-            console.log('processAITurn: Game is over');
             return;
         }
         
-        console.log('processAITurn: Starting AI turn processing');
         this.isProcessing = true;
         this.updateStatus("Opponent is thinking...");
         
@@ -415,7 +395,6 @@ class PokerGame {
                 
                 // Check if it's a session not found error
                 if (response.status === 404 && errorMessage.includes('Game session not found')) {
-                    console.warn('Game session lost during AI turn. Restarting game...');
                     this.showNotification('Game session expired. Starting new game...', 'warning', 5000);
                     // Restart the game automatically
                     await this.startNewGame();
@@ -438,7 +417,7 @@ class PokerGame {
             }
             
             // Debug logging after AI turn
-            console.log('After AI turn - game state:', {
+            console.log('Game state after AI turn:', {
                 current_player: this.gameState.current_player,
                 is_waiting_for_action: this.gameState.is_waiting_for_action,
                 is_over: this.gameState.is_over,
@@ -454,7 +433,6 @@ class PokerGame {
                 this.isProcessing = false;
             } else if (this.gameState.current_player === 0 && this.gameState.is_waiting_for_action) {
                 // It's our turn again - make sure buttons are enabled
-                console.log('It should be our turn - enabling buttons');
                 this.isProcessing = false; // Ensure processing flag is reset
                 this.updateActionButtons();
             } else {
@@ -463,7 +441,6 @@ class PokerGame {
                 this.isProcessing = false;
             }
         } catch (error) {
-            console.error('Error processing AI turn:', error);
             const errorMessage = error.message || 'Unknown error occurred';
             this.updateStatus('Error processing opponent turn: ' + errorMessage);
             this.showNotification('Error: ' + errorMessage, 'error', 5000);
@@ -747,16 +724,12 @@ class PokerGame {
     updatePot() {
         if (this.gameState.pot !== undefined) {
             const bigBlind = this.gameState.big_blind || 2;
-            const raised = this.gameState.raised || [0, 0];
+            const pot = this.gameState.pot || 0;
             
-            // Calculate unmatched bet (difference between what each player has bet this round)
-            // This represents money that should be shown in front of players, not in the pot
-            const unmatchedBet = Math.abs(raised[0] - raised[1]);
-            
-            // Subtract unmatched bets from pot to show only committed money
-            // When round ends (stage changes), all bets are matched and go into pot
-            const displayedPot = Math.max(0, this.gameState.pot - unmatchedBet);
-            const potBB = displayedPot.toFixed(1);
+            // Backend now calculates pot accurately using centralized pot calculator
+            // Pot includes all bets (matched + unmatched) during betting rounds
+            // Simply convert to BB for display
+            const potBB = (pot / bigBlind).toFixed(1);
             
             const potEl = document.getElementById('potDisplay');
             if (potEl) {
@@ -1339,7 +1312,7 @@ class PokerGame {
         
         // Debug logging (can be removed in production)
         if (window.DEBUG_POKER) {
-            console.log('Check/Call Logic:', {
+            console.log('Action button context:', {
                 playerRaised,
                 opponentRaised,
                 diff: opponentRaised - playerRaised,
@@ -1387,8 +1360,7 @@ class PokerGame {
         // Always try to fetch from API first - this should be the primary source
         let apiSuccess = false;
         try {
-            console.log(`🎯 [FRONTEND] Fetching button labels from API for session ${this.sessionId}`);
-            console.log(`📊 [FRONTEND] Current game state:`, {
+            console.log('Fetching button labels with game state:', {
                 stage: this.gameState.stage,
                 button_id: this.gameState.button_id,
                 raised: this.gameState.raised,
@@ -1407,7 +1379,6 @@ class PokerGame {
 
             if (response.ok) {
                 const apiLabels = await response.json();
-                console.log(`✅ [FRONTEND] API returned labels:`, apiLabels);
                 buttonLabels = {
                     raiseHalfPot: apiLabels.raiseHalfPot || buttonLabels.raiseHalfPot,
                     raisePot: apiLabels.raisePot || buttonLabels.raisePot,
@@ -1418,15 +1389,12 @@ class PokerGame {
                 apiSuccess = true;
             } else {
                 const errorText = await response.text();
-                console.error(`❌ [FRONTEND] API returned error ${response.status}:`, errorText);
             }
         } catch (error) {
-            console.error(`❌ [FRONTEND] Failed to fetch button labels from API:`, error);
         }
 
         // Only use local calculation as fallback if API completely failed
         if (!apiSuccess) {
-            console.warn(`⚠️ [FRONTEND] API failed, falling back to local calculation`);
 
             // Use ActionLabeling-compatible logic for fallback
             // Reconstruct context similar to ActionLabeling.get_context_from_state
@@ -1466,7 +1434,7 @@ class PokerGame {
                 }
             }
 
-            console.log(`📊 [FRONTEND] Local calculation with ActionLabeling logic:`, {
+            console.log('Button label calculation context:', {
                 isPreflop, isSmallBlind, localIsFirstToAct, localIsFacingBet, localBettingLevel,
                 bigBlind, pot, opponentRaised, playerRaised
             });
@@ -1488,7 +1456,7 @@ class PokerGame {
 
             // Debug logging for legal actions
             if (window.DEBUG_POKER && actionValue === 0) {  // Only log once per update
-                console.log(`🎯 [FRONTEND] Legal actions check for action ${actionValue}:`, {
+                console.log('Legal actions check:', {
                     actionValue,
                     legal_actions: this.gameState.legal_actions,
                     raw_legal_actions: this.gameState.raw_legal_actions,
@@ -1508,7 +1476,7 @@ class PokerGame {
 
             // Debug logging for button state
             if (window.DEBUG_POKER && actionValue === 0) {  // Only log once per update
-                console.log(`🔘 [FRONTEND] Button ${actionValue} final state:`, {
+                console.log('Button state update:', {
                     actionValue,
                     current_player: this.gameState.current_player,
                     is_waiting_for_action: this.gameState.is_waiting_for_action,
@@ -1750,7 +1718,6 @@ class PokerGame {
                 window.handAnalysisModal.show(analysis);
             }
         } catch (error) {
-            console.error('Error analyzing hand:', error);
             // Show user-friendly error message
             let errorMsg = 'Analysis unavailable, please try again';
             if (error.message) {
@@ -1780,7 +1747,6 @@ class PokerGame {
                 // This handles cases where an action request might have failed silently
                 if (this.gameState && this.gameState.is_waiting_for_action && 
                     this.gameState.current_player === 0) {
-                    console.warn('Resetting stuck isProcessing flag');
                     this.isProcessing = false;
                 } else {
                     return; // Still processing, skip this poll
@@ -1797,7 +1763,6 @@ class PokerGame {
                         if (state.current_player === 1 && !state.is_over && !this.isProcessing) {
                             // It's AI's turn - trigger AI action automatically
                             // This handles cases like after the flop when BB acts first, or preflop
-                            console.log('Polling detected AI turn - triggering processAITurn');
                             this.processAITurn();
                             return; // Exit early to avoid duplicate state updates
                         }
@@ -1816,14 +1781,12 @@ class PokerGame {
                             } else if (state.current_player === 1 && !state.is_over && !this.isProcessing) {
                                 // It's AI's turn - trigger AI action automatically
                                 // This handles cases like after the flop when BB acts first
-                                console.log('State change detected AI turn - triggering processAITurn');
                                 this.processAITurn();
                             }
                         }
                     }
                 }
             } catch (error) {
-                console.error('Error polling game state:', error);
             }
         }, 1000);
     }

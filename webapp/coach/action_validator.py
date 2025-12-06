@@ -5,9 +5,8 @@ Centralized validation layer that checks action appropriateness before execution
 Provides clear error messages for invalid actions.
 """
 
-import logging
+# logging removed
 
-logger = logging.getLogger(__name__)
 
 
 class ActionValidator:
@@ -85,7 +84,6 @@ class ActionValidator:
             return True, None
             
         except Exception as e:
-            logger.warning(f"Error during action validation: {e}")
             # Don't fail validation on error, just log it
             return True, None
     

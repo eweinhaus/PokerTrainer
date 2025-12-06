@@ -119,7 +119,6 @@ class HandAnalysisModal {
     
     show(analysisData) {
         if (!analysisData) {
-            console.error('No analysis data provided');
             return;
         }
         
@@ -377,10 +376,8 @@ class HandAnalysisModal {
                     }
                 } else {
                     // If we get a non-200 response, log it but continue polling
-                    console.warn('Non-OK response from async endpoint:', response.status);
                 }
             } catch (error) {
-                console.error('Error polling async results:', error);
                 // Continue polling on error (network issues might be temporary)
             }
         }, 500); // Poll every 500ms
@@ -395,7 +392,6 @@ class HandAnalysisModal {
         
         // Check for errors
         if (llmData.error) {
-            console.error('LLM enhancement error:', llmData.error);
             this.showLLMError(llmData.error);
             return;
         }
@@ -609,7 +605,6 @@ class ChatManager {
             
         } catch (error) {
             // Network error - user-friendly message
-            console.error('Chat error:', error);
             let errorMsg = 'Unable to connect to coach. Please check your connection and try again.';
             if (error.message && error.message.includes('timeout')) {
                 errorMsg = 'Request timed out. Please try again.';

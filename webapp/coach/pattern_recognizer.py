@@ -5,11 +5,10 @@ Analyzes patterns across multiple hands in a session to identify
 recurring mistakes, good habits, tendencies, and improvement areas.
 """
 
-import logging
+# logging removed
 from typing import List, Dict, Any, Optional
 from collections import defaultdict
 
-logger = logging.getLogger(__name__)
 
 
 class PatternRecognizer:
@@ -79,7 +78,6 @@ class PatternRecognizer:
             return hands[-count:] if len(hands) > count else hands
             
         except Exception as e:
-            logger.error(f"Error retrieving recent hands: {e}")
             return []
     
     def extract_decision_patterns(self, hand_list: List[Dict[str, Any]]) -> Dict[str, Any]:

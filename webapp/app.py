@@ -36,6 +36,7 @@ from coach.action_validator import ActionValidator
 from coach.chatbot_coach import ChatbotCoach
 from coach.gto_agent import GTOAgent
 from coach.llm_opponent_agent import LLMOpponentAgent
+from coach.pot_calculator import calculate_pot_from_state, pot_to_bb, calculate_pot
 
 # Configure logging
 logging.basicConfig(
@@ -50,50 +51,59 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 
 def convert_card_ints(obj):
     """Convert card integers and RLCard Card objects to string format for frontend display"""
+    if obj is None:
+        return obj
+    
+    # Handle list of cards
+    if isinstance(obj, list):
+        result = []
+        for card in obj:
+            try:
+                # Try to get Card object index first
+                from rlcard.games.base import Card
+                if isinstance(card, Card):
+                    card_index = card.get_index()
+                else:
+                    # Convert to int (handles numpy types)
+                    card_index = int(card)
+            except (ImportError, ValueError, TypeError, AttributeError):
+                # If conversion fails, try direct int conversion
+                try:
+                    card_index = int(card)
+                except (ValueError, TypeError):
+                    # If it's already a string, keep it
+                    result.append(str(card))
+                    continue
+            
+            # Convert card index (0-51) to string format (e.g., "SA", "KH")
+            if 0 <= card_index <= 51:
+                suits = ['S', 'H', 'D', 'C']  # Spades, Hearts, Diamonds, Clubs
+                ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+                suit_idx = card_index // 13
+                rank_idx = card_index % 13
+                suit = suits[suit_idx]
+                rank = ranks[rank_idx]
+                result.append(suit + rank)
+            else:
+                result.append(str(card))
+        return result
+    
     # Handle single Card object
     try:
         from rlcard.games.base import Card
         if isinstance(obj, Card):
-            # Convert Card object to string format (e.g., "AS", "KH")
-            return obj.get_index()
-    except ImportError:
-        pass  # RLCard not available, continue with integer conversion
-
-    # Handle list of cards (integers or Card objects)
-    if isinstance(obj, list) and len(obj) > 0:
-        # Check if this looks like a hand (2 cards) or community cards
-        if len(obj) == 2 or len(obj) == 3 or len(obj) == 4 or len(obj) == 5:
-            result = []
-            for card in obj:
-                try:
-                    from rlcard.games.base import Card
-                    if isinstance(card, Card):
-                        # Convert Card object to string
-                        result.append(card.get_index())
-                    elif isinstance(card, int) and 0 <= card <= 51:
-                        # Convert card integer to string
-                        suits = ['S', 'H', 'D', 'C']  # Spades, Hearts, Diamonds, Clubs
-                        ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
-                        suit_idx = card // 13
-                        rank_idx = card % 13
-                        suit = suits[suit_idx]
-                        rank = ranks[rank_idx]
-                        result.append(suit + rank)
-                    else:
-                        result.append(str(card))
-                except ImportError:
-                    # Fallback for when RLCard is not available
-                    if isinstance(card, int) and 0 <= card <= 51:
-                        suits = ['S', 'H', 'D', 'C']
-                        ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
-                        suit_idx = card // 13
-                        rank_idx = card % 13
-                        suit = suits[suit_idx]
-                        rank = ranks[rank_idx]
-                        result.append(suit + rank)
-                    else:
-                        result.append(str(card))
-            return result
+            card_index = obj.get_index()
+            suits = ['S', 'H', 'D', 'C']
+            ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K']
+            suit_idx = card_index // 13
+            rank_idx = card_index % 13
+            suit = suits[suit_idx]
+            rank = ranks[rank_idx]
+            return suit + rank
+    except (ImportError, AttributeError):
+        pass
+    
+    # If it's already a string or something else, return as-is
     return obj
 
 def convert_numpy_types(obj):
@@ -398,14 +408,158 @@ class GameManager:
                 pass
         
         # Get raised array (amount bet in current betting round)
+        # CRITICAL: RLCard resets raised array after betting rounds, so we need to reconstruct it
+        # from action history to get accurate pot calculation
         raised = raw_obs.get('raised', [0, 0])
+        
+        # Reconstruct raised array from action history for accurate pot calculation
+        # CRITICAL: For postflop, use in_chips for cumulative pot, not raised array
+        # For preflop, reconstruct raised array from action history
+        if stage == 0 and hasattr(env, 'action_recorder') and env.action_recorder:
+            try:
+                # Get action history
+                action_history = env.action_recorder
+                big_blind = raw_obs.get('big_blind', 2)
+                small_blind = big_blind // 2
+                
+                # Initialize raised array with blinds for preflop
+                reconstructed_raised = [0, 0]
+                if dealer_id is not None:  # Preflop
+                    small_blind_player = (dealer_id + 1) % 2
+                    big_blind_player = (dealer_id + 2) % 2
+                    reconstructed_raised[small_blind_player] = small_blind
+                    reconstructed_raised[big_blind_player] = big_blind
+                
+                # Replay all preflop actions to reconstruct raised array
+                for action_record in action_history:
+                    if len(action_record) >= 2:
+                        action_player_id, action_value = action_record[0], action_record[1]
+                        
+                        # Get action value as int
+                        if hasattr(action_value, 'value'):
+                            action_int = action_value.value
+                        elif isinstance(action_value, int):
+                            action_int = action_value
+                        else:
+                            try:
+                                action_int = int(action_value)
+                            except:
+                                continue
+                        
+                        # Reconstruct state to get bet amount
+                        temp_state = {
+                            'raw_obs': {
+                                'raised': reconstructed_raised.copy(),
+                                'big_blind': big_blind,
+                                'pot': calculate_pot(reconstructed_raised.copy(), big_blind, dealer_id, 0),
+                                'stage': 0
+                            }
+                        }
+                        bet_amount = self._get_bet_amount(action_int, env, action_player_id, temp_state)
+                        
+                        # Update raised array based on action
+                        if action_int in [2, 3]:  # Raise actions
+                            opponent_id = 1 - action_player_id
+                            opponent_raised = reconstructed_raised[opponent_id]
+                            if bet_amount < opponent_raised:
+                                reconstructed_raised[action_player_id] = opponent_raised + big_blind
+                            else:
+                                reconstructed_raised[action_player_id] = bet_amount
+                        elif action_int == 1:  # Call/Check
+                            opponent_id = 1 - action_player_id
+                            if reconstructed_raised[opponent_id] > reconstructed_raised[action_player_id]:
+                                reconstructed_raised[action_player_id] = reconstructed_raised[opponent_id]
+                
+                # Use reconstructed raised array for preflop
+                raised = reconstructed_raised
+                logger.info(f"💰 [POT_RECONSTRUCT] Preflop - Reconstructed raised array: {raised} from {len(action_history)} actions")
+            except Exception as e:
+                logger.warning(f"💰 [POT_RECONSTRUCT] Failed to reconstruct raised array: {e}, using raw_obs raised: {raised}")
+        else:
+            # Postflop: Reconstruct cumulative pot from full action history
+            # RLCard's in_chips may not be updated correctly across betting rounds
+            if hasattr(env, 'action_recorder') and env.action_recorder:
+                try:
+                    # Get full action history
+                    action_history = env.action_recorder
+                    big_blind = raw_obs.get('big_blind', 2)
+                    small_blind = big_blind // 2
+
+                    # Initialize cumulative pot with blinds
+                    cumulative_raised = [0, 0]
+                    if dealer_id is not None:
+                        small_blind_player = (dealer_id + 1) % 2
+                        big_blind_player = (dealer_id + 2) % 2
+                        cumulative_raised[small_blind_player] = small_blind
+                        cumulative_raised[big_blind_player] = big_blind
+
+                    # Replay ALL actions to get cumulative raised amounts
+                    for action_record in action_history:
+                        if len(action_record) >= 2:
+                            action_player_id, action_value = action_record[0], action_record[1]
+
+                            # Get action value as int
+                            if hasattr(action_value, 'value'):
+                                action_int = action_value.value
+                            elif isinstance(action_value, int):
+                                action_int = action_value
+                            else:
+                                try:
+                                    action_int = int(action_value)
+                                except:
+                                    continue
+
+                            # Reconstruct state to get bet amount
+                            temp_state = {
+                                'raw_obs': {
+                                    'raised': cumulative_raised.copy(),
+                                    'big_blind': big_blind,
+                                    'pot': calculate_pot(cumulative_raised.copy(), big_blind, dealer_id, 0),  # Use stage 0 for bet calculation
+                                    'stage': 0
+                                }
+                            }
+                            bet_amount = self._get_bet_amount(action_int, env, action_player_id, temp_state)
+
+                            # Update cumulative raised array based on action
+                            if action_int in [2, 3]:  # Raise actions
+                                opponent_id = 1 - action_player_id
+                                opponent_raised = cumulative_raised[opponent_id]
+                                if bet_amount < opponent_raised:
+                                    cumulative_raised[action_player_id] = opponent_raised + big_blind
+                                else:
+                                    cumulative_raised[action_player_id] = bet_amount
+                            elif action_int == 1:  # Call/Check
+                                opponent_id = 1 - action_player_id
+                                if cumulative_raised[opponent_id] > cumulative_raised[action_player_id]:
+                                    cumulative_raised[action_player_id] = cumulative_raised[opponent_id]
+
+                    # Use cumulative raised array for postflop pot calculation
+                    raised = cumulative_raised
+                    logger.info(f"💰 [POT_RECONSTRUCT] Postflop (stage {stage}) - Reconstructed cumulative raised: {raised} from {len(action_history)} total actions")
+                except Exception as e:
+                    logger.warning(f"💰 [POT_RECONSTRUCT] Failed to reconstruct cumulative pot: {e}, using raw_obs raised: {raised}")
+            else:
+                raised = raw_obs.get('raised', [0, 0])
+                logger.info(f"💰 [POT_RECONSTRUCT] Postflop (stage {stage}) - No action history, using raw_obs raised: {raised}")
+        
+        # Calculate pot accurately using centralized pot calculator with reconstructed raised array
+        # Create a modified raw_obs with the reconstructed raised array
+        modified_raw_obs = raw_obs.copy()
+        modified_raw_obs['raised'] = raised
+        # Also include in_chips in raw_obs if available (for postflop cumulative pot calculation)
+        if in_chips and len(in_chips) >= 2:
+            modified_raw_obs['in_chips'] = in_chips
+        pot = calculate_pot_from_state(modified_raw_obs, env)
+        pot_bb = pot_to_bb(pot, raw_obs.get('big_blind', 2))
+        logger.info(f"💰 [POT_CALC] Session: {session_id}, Pot: {pot} chips ({pot_bb:.1f} BB), "
+                   f"Raised: {raised}, Stage: {stage}, Dealer: {dealer_id}, in_chips: {in_chips}")
         
         # Build game state response
         game_state = {
             'hand': player_hand,  # Use stored player hand, not raw_obs hand
             'public_cards': raw_obs.get('public_cards', []),
             'stakes': raw_obs.get('stakes', [0, 0]),
-            'pot': raw_obs.get('pot', 0),
+            'pot': pot,  # Use calculated pot instead of raw_obs pot
             'stage': stage,
             'legal_actions': legal_actions,
             'raw_legal_actions': raw_legal_actions,
@@ -422,9 +576,39 @@ class GameManager:
             'opponent_hand': self._get_opponent_hand(env) if env.is_over() else None
         }
         
-        # Convert numpy types to native Python types for JSON serialization
+        # Convert numpy types to native Python types for JSON serialization first
         game_state = convert_numpy_types(game_state)
         
+        # Convert card integers to strings for frontend display (after numpy conversion)
+        # CRITICAL: Always convert cards to string format for frontend
+        # Force conversion by explicitly checking and converting
+        hand = game_state.get('hand', [])
+        if hand and isinstance(hand, list) and len(hand) > 0:
+            converted = convert_card_ints(hand)
+            if converted and isinstance(converted, list):
+                game_state['hand'] = converted
+        
+        public_cards = game_state.get('public_cards', [])
+        if public_cards and isinstance(public_cards, list):
+            converted = convert_card_ints(public_cards)
+            if converted and isinstance(converted, list):
+                game_state['public_cards'] = converted
+        
+        opponent_hand = game_state.get('opponent_hand')
+        if opponent_hand and isinstance(opponent_hand, list) and len(opponent_hand) > 0:
+            converted = convert_card_ints(opponent_hand)
+            if converted and isinstance(converted, list):
+                game_state['opponent_hand'] = converted
+
+        # Final pot recalculation using reconstructed raised array (already done above, but ensure consistency)
+        # The pot was already calculated with reconstructed raised array above, so this is just for logging
+        final_pot = calculate_pot(raised, game_state.get('big_blind', 2), dealer_id, stage)
+        if final_pot > 0 and final_pot != pot:
+            logger.info(f"💰 [POT_FINAL] Final pot recalculation: {final_pot} chips ({pot_to_bb(final_pot, game_state.get('big_blind', 2)):.1f} BB) with raised: {raised}")
+            game_state['pot'] = final_pot
+        else:
+            game_state['pot'] = pot
+
         return game_state
     
     def _build_action_history(self, env, state, session_id):
@@ -790,11 +974,12 @@ class GameManager:
                             continue
                     
                     # Reconstruct state at this point to calculate bet amount
+                    temp_pot = calculate_pot(raised.copy(), big_blind, dealer_id, action_stage)
                     temp_state = {
                         'raw_obs': {
                             'raised': raised.copy(),
                             'big_blind': big_blind,
-                            'pot': sum(raised),
+                            'pot': temp_pot,
                             'stage': raw_obs.get('stage', 0)
                         }
                     }
@@ -824,8 +1009,9 @@ class GameManager:
         reconstructed_state = state.copy()
         reconstructed_state['raw_obs'] = raw_obs.copy()
         reconstructed_state['raw_obs']['raised'] = raised
-        # Recalculate pot based on raised amounts
-        reconstructed_state['raw_obs']['pot'] = sum(raised)
+        # Recalculate pot based on raised amounts using centralized calculator
+        pot = calculate_pot(raised, big_blind, dealer_id, action_stage)
+        reconstructed_state['raw_obs']['pot'] = pot
 
         return reconstructed_state
     
@@ -843,6 +1029,28 @@ class GameManager:
         # Get initial values
         big_blind = raw_obs.get('big_blind', 2)
         small_blind = big_blind // 2
+        
+        # Get stage
+        current_stage = raw_obs.get('stage', 0)
+        if hasattr(current_stage, 'value'):
+            current_stage = current_stage.value
+        elif not isinstance(current_stage, int):
+            current_stage = int(current_stage) if current_stage else 0
+        
+        # Get public cards count to determine betting round
+        public_cards = raw_obs.get('public_cards', [])
+        current_public_cards_count = len(public_cards)
+        
+        # Determine which betting round this action belongs to
+        action_stage = 0  # Default to preflop
+        if current_public_cards_count >= 5:
+            action_stage = 3  # River
+        elif current_public_cards_count >= 4:
+            action_stage = 2  # Turn
+        elif current_public_cards_count >= 3:
+            action_stage = 1  # Flop
+        else:
+            action_stage = 0  # Preflop
         
         # Initialize raised amounts based on blinds
         dealer_id = None
@@ -875,11 +1083,12 @@ class GameManager:
                             continue
                     
                     # Reconstruct state at this point to calculate bet amount
+                    temp_pot = calculate_pot(raised.copy(), big_blind, dealer_id, action_stage)
                     temp_state = {
                         'raw_obs': {
                             'raised': raised.copy(),
                             'big_blind': big_blind,
-                            'pot': sum(raised),
+                            'pot': temp_pot,
                             'stage': raw_obs.get('stage', 0)
                         }
                     }
@@ -904,7 +1113,9 @@ class GameManager:
         reconstructed_state = state.copy()
         reconstructed_state['raw_obs'] = raw_obs.copy()
         reconstructed_state['raw_obs']['raised'] = raised
-        reconstructed_state['raw_obs']['pot'] = sum(raised)
+        # Recalculate pot using centralized calculator
+        pot = calculate_pot(raised, big_blind, dealer_id, action_stage)
+        reconstructed_state['raw_obs']['pot'] = pot
         
         return reconstructed_state
     
@@ -1620,6 +1831,12 @@ class GameManager:
                 dealer_id = env.game.dealer_id
             state_with_dealer = state.copy()
             state_with_dealer['dealer_id'] = dealer_id
+
+            # Pass actual action history to LLM agent (if available)
+            # This ensures LLM knows about all previous actions, especially raises
+            if 'action_history_with_cards' in game:
+                state_with_dealer['action_history_with_cards'] = game['action_history_with_cards'].copy()
+                logger.info(f"📋 [AI_TURN] Passing {len(state_with_dealer['action_history_with_cards'])} action history entries to LLM agent")
 
             # Ensure legal actions are available in state for AI agent
             if not state_with_dealer.get('raw_legal_actions'):
