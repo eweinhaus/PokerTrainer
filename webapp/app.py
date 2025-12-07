@@ -190,21 +190,32 @@ class GameManager:
     
     def start_game(self, session_id):
         """Start a new game for a session"""
+        logger.info(f"=== GAME_MANAGER.START_GAME({session_id}) CALLED ===")
+
         # Create environment with BB-first action order support
         # Use a custom environment that handles the game creation properly
         try:
+            logger.info("Attempting to create RLCard environment...")
             env = rlcard.make('no-limit-holdem')
-        except AttributeError as e:
+            logger.info("RLCard environment created successfully")
+        except Exception as e:
+            logger.warning(f"Exception creating RLCard environment: {type(e).__name__}: {e}")
             if "'NolimitholdemGame' object has no attribute 'configure'" in str(e):
                 # Fallback: Use mock environment if RLCard patching failed
+                logger.info("Falling back to mock environment...")
                 from rlcard_mock import MockEnvironment
                 env = MockEnvironment()
-                print("Using mock environment due to RLCard patching failure")
+                logger.info("Using mock environment due to RLCard patching failure")
             else:
+                logger.error(f"Raising exception: {e}")
                 raise e
+
+        logger.debug(f"Environment created: {type(env)}")
+        logger.debug(f"Environment has game attribute: {hasattr(env, 'game')}")
 
         # PATCH: Apply BB-first action order logic to the game
         if hasattr(env, 'game') and hasattr(env.game, '__class__'):
+            logger.info("Applying BB-first patches to game...")
             original_init_game = env.game.init_game
             original_step = env.game.step
 
@@ -238,16 +249,27 @@ class GameManager:
             # Monkey patch the methods
             env.game.init_game = lambda: patched_init_game(env.game)
             env.game.step = lambda action: patched_step(env.game, action)
-        
+            logger.info("BB-first patches applied successfully")
+        else:
+            logger.info("Skipping BB-first patches - not a standard RLCard environment")
+
+        logger.debug(f"Environment num_actions: {env.num_actions}")
+
         # Create agents
+        logger.info("Creating human agent...")
         human_agent = WebHumanAgent(env.num_actions)
+        logger.info("Creating AI agent...")
         # Use LLM opponent agent instead of GTO agent for LLM-powered decisions
         # Falls back to GTOAgent on LLM failures
         ai_agent = LLMOpponentAgent(num_actions=env.num_actions)
+        logger.info("Setting agents on environment...")
         env.set_agents([human_agent, ai_agent])
-        
+
         # Reset environment
+        logger.info("Resetting environment...")
         state, player_id = env.reset()
+        logger.info(f"Environment reset successful. Player ID: {player_id}")
+        logger.debug(f"Initial state keys: {list(state.keys()) if isinstance(state, dict) else type(state)}")
         
         # Store game state
         # Get human player's hand (player 0) from the game
@@ -292,9 +314,14 @@ class GameManager:
         }
         
         # Emit blind events immediately after game initialization
+        logger.debug("Emitting blind events...")
         self._emit_blind_events(session_id, env)
-        
-        return self.get_game_state(session_id)
+
+        logger.info("Getting final game state...")
+        final_state = self.get_game_state(session_id)
+        logger.debug(f"Final game state type: {type(final_state)}")
+        logger.info("=== GAME_MANAGER.START_GAME() COMPLETED SUCCESSFULLY ===")
+        return final_state
     
     def get_game_state(self, session_id):
         """Get current game state for a session"""
@@ -2126,29 +2153,27 @@ def start_game():
     try:
         if not request.is_json:
             return jsonify({'error': 'Request must be JSON'}), 400
-        
+
         data = request.get_json()
         session_id = data.get('session_id')
-        
+
         if not session_id:
             return jsonify({'error': 'Missing required field: session_id'}), 400
-        
+
         # Start new game
         game_state = game_manager.start_game(session_id)
-        
+
         if game_state is None:
+            logger.error(f"Game creation failed for session {session_id} - start_game returned None")
             return jsonify({'error': 'Failed to start game'}), 500
-        
+
         return jsonify(game_state), 200
-    
-    except ValueError as e:
-        logger.warning(f"Invalid input in start_game: {str(e)}")
-        return jsonify({'error': f'Invalid input: {str(e)}'}), 400
+
     except Exception as e:
-        error_msg = str(e)
-        logger.error(f"Error starting game: {error_msg}")
+        logger.error(f"Error starting game: {str(e)}")
+        logger.error("Full traceback:")
         logger.error(traceback.format_exc())
-        return jsonify({'error': f'An unexpected error occurred: {error_msg}'}), 500
+        return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
 
 
 @app.route('/api/game/state', methods=['GET'])
