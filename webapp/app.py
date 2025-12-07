@@ -197,7 +197,10 @@ class GameManager:
         env = rlcard.make('no-limit-holdem')
 
         # PATCH: Apply BB-first action order logic to the game
-        if hasattr(env, 'game') and hasattr(env.game, '__class__'):
+        # Only patch if we have the real RLCard game object with required methods
+        if (hasattr(env, 'game') and hasattr(env.game, '__class__') and
+            hasattr(env.game, 'init_game') and hasattr(env.game, 'step') and
+            env.game.__class__.__name__ != 'MockGame'):
             original_init_game = env.game.init_game
             original_step = env.game.step
 
