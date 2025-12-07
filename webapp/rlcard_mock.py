@@ -47,7 +47,7 @@ class MockEnvironment:
         self.num_actions = 5  # Standard poker actions
         self.agents = []
         self.game = MockGame()
-        # Initialize with proper game state (random cards, 100 BB stacks)
+        # Initialize with proper game state (random cards, 50 BB stacks)
         self.game_state = self._create_initial_game_state()
 
     def _create_initial_game_state(self):
@@ -62,7 +62,7 @@ class MockEnvironment:
             'public_cards': [],
             'hands': [hand1, hand2],  # Random hands instead of hardcoded AA
             'raised': [1, 2],  # SB: 1, BB: 2
-            'all_chips': [198, 196],  # 100 BB stacks minus blinds (200-2=198, 200-4=196)
+            'all_chips': [99, 98],  # 50 BB stacks minus blinds (100-1=99, 100-2=98)
             'current_player': 0
         }
 

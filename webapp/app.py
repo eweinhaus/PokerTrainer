@@ -572,7 +572,8 @@ class GameManager:
 
         # Calculate remaining stacks (stakes)
         # RLCard provides 'stakes' as remaining chips, but it might not always be populated
-        # Fallback: Calculate from all_chips - in_chips, or use default 100 BB stacks
+        # Fallback: Calculate from all_chips - in_chips, or use default 50 BB stacks (100 chips)
+        # RLCard default is 100 chips per player = 50 BB (with BB=2)
         stakes = raw_obs.get('stakes', None)
         all_chips = raw_obs.get('all_chips', None)
         
@@ -587,18 +588,18 @@ class GameManager:
                 stakes = [int(all_chips[0]), int(all_chips[1])]
                 logger.debug(f"💰 [STACKS] Using all_chips as stakes: {stakes}")
             else:
-                # Final fallback: Default to 100 BB stacks (200 chips each)
+                # Final fallback: Default to 50 BB stacks (100 chips each) - RLCard default
                 big_blind = raw_obs.get('big_blind', 2)
-                default_chips = 200  # 100 BB
+                default_chips = 100  # 50 BB (RLCard default)
                 stakes = [default_chips, default_chips]
-                logger.warning(f"💰 [STACKS] Using default 100 BB stacks: {stakes} (all_chips={all_chips}, in_chips={in_chips})")
+                logger.warning(f"💰 [STACKS] Using default 50 BB stacks: {stakes} (all_chips={all_chips}, in_chips={in_chips})")
         else:
             logger.debug(f"💰 [STACKS] Using stakes from raw_obs: {stakes}")
         
         # Ensure stakes is a list of 2 integers
         if not isinstance(stakes, list) or len(stakes) < 2:
             big_blind = raw_obs.get('big_blind', 2)
-            default_chips = 200  # 100 BB
+            default_chips = 100  # 50 BB (RLCard default)
             stakes = [default_chips, default_chips]
             logger.warning(f"💰 [STACKS] Invalid stakes format, using default: {stakes}")
 
@@ -619,7 +620,7 @@ class GameManager:
             'dealer_id': dealer_id,
             'raised': raised,
             'in_chips': in_chips,  # Total chips each player has put in this hand
-            'all_chips': raw_obs.get('all_chips', [200, 200]),  # Starting chips (for debugging)
+            'all_chips': raw_obs.get('all_chips', [100, 100]),  # Starting chips (50 BB each, for debugging)
             'action_history': self._build_action_history(env, state, session_id),  # Legacy format
             'hand_events': [event.to_dict() for event in game.get('hand_events', [])],  # New event-based format
             'payoffs': env.get_payoffs() if env.is_over() else None,
