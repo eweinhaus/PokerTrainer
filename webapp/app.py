@@ -549,10 +549,25 @@ class GameManager:
         
         # Get in_chips from players (amount each player has bet in current hand)
         in_chips = [0, 0]
+        # Also try to get remaining chips directly from player objects (more reliable than raw_obs)
+        remaining_chips = [0, 0]
         if hasattr(env, 'game') and hasattr(env.game, 'players'):
             try:
                 in_chips = [int(p.in_chips) for p in env.game.players]
-            except:
+                # Try to get remaining chips from player objects if available
+                # RLCard players might have a 'remained_chips' or 'chips' attribute
+                for i, player in enumerate(env.game.players):
+                    if hasattr(player, 'remained_chips'):
+                        remaining_chips[i] = int(player.remained_chips)
+                    elif hasattr(player, 'chips'):
+                        remaining_chips[i] = int(player.chips)
+                    elif hasattr(player, 'in_chips') and hasattr(env.game, 'init_chips'):
+                        # Calculate: starting chips - chips bet
+                        starting = env.game.init_chips[i] if hasattr(env.game, 'init_chips') and i < len(env.game.init_chips) else 100
+                        remaining_chips[i] = starting - int(player.in_chips)
+                logger.debug(f"💰 [STACKS] Remaining chips from players: {remaining_chips}")
+            except Exception as e:
+                logger.debug(f"💰 [STACKS] Error getting chips from players: {e}")
                 pass
         
         # Get raised array (amount bet in current betting round)
@@ -571,30 +586,45 @@ class GameManager:
         pot_bb = pot_to_bb(pot, raw_obs.get('big_blind', 2))
 
         # Calculate remaining stacks (stakes)
-        # RLCard provides 'stakes' as remaining chips, but it might not always be populated
-        # Fallback: Calculate from all_chips - in_chips, or use default 50 BB stacks (100 chips)
-        # RLCard default is 100 chips per player = 50 BB (with BB=2)
-        stakes = raw_obs.get('stakes', None)
-        all_chips = raw_obs.get('all_chips', None)
+        # Priority order:
+        # 1. Remaining chips from player objects (most reliable)
+        # 2. stakes from raw_obs (if available and valid)
+        # 3. Calculate from all_chips - in_chips
+        # 4. Use all_chips directly
+        # 5. Default to 50 BB stacks (100 chips) - RLCard default
         
-        if stakes is None or (isinstance(stakes, list) and len(stakes) >= 2 and stakes[0] == 0 and stakes[1] == 0):
-            # stakes not available or all zeros, try to calculate from all_chips
-            if all_chips and len(all_chips) >= 2 and in_chips and len(in_chips) >= 2:
-                # Calculate remaining stacks: starting chips - chips bet this hand
-                stakes = [int(all_chips[0]) - int(in_chips[0]), int(all_chips[1]) - int(in_chips[1])]
-                logger.debug(f"💰 [STACKS] Calculated stakes from all_chips - in_chips: {stakes}")
-            elif all_chips and len(all_chips) >= 2:
-                # Use all_chips directly if in_chips not available
-                stakes = [int(all_chips[0]), int(all_chips[1])]
-                logger.debug(f"💰 [STACKS] Using all_chips as stakes: {stakes}")
-            else:
-                # Final fallback: Default to 50 BB stacks (100 chips each) - RLCard default
-                big_blind = raw_obs.get('big_blind', 2)
-                default_chips = 100  # 50 BB (RLCard default)
-                stakes = [default_chips, default_chips]
-                logger.warning(f"💰 [STACKS] Using default 50 BB stacks: {stakes} (all_chips={all_chips}, in_chips={in_chips})")
+        all_chips = raw_obs.get('all_chips', None)
+        raw_stakes = raw_obs.get('stakes', None)
+        
+        # Log what RLCard is actually providing for debugging
+        logger.debug(f"💰 [STACKS_DEBUG] raw_obs keys: {list(raw_obs.keys())}")
+        logger.debug(f"💰 [STACKS_DEBUG] stakes from raw_obs: {raw_stakes}")
+        logger.debug(f"💰 [STACKS_DEBUG] all_chips from raw_obs: {all_chips}")
+        logger.debug(f"💰 [STACKS_DEBUG] in_chips from players: {in_chips}")
+        logger.debug(f"💰 [STACKS_DEBUG] remaining_chips from players: {remaining_chips}")
+        
+        # Priority 1: Use remaining chips from player objects if available and valid
+        if remaining_chips and len(remaining_chips) >= 2 and (remaining_chips[0] > 0 or remaining_chips[1] > 0):
+            stakes = [int(remaining_chips[0]), int(remaining_chips[1])]
+            logger.info(f"💰 [STACKS] Using remaining_chips from player objects: {stakes}")
+        # Priority 2: Use stakes from raw_obs if available and valid
+        elif raw_stakes and isinstance(raw_stakes, list) and len(raw_stakes) >= 2 and not (raw_stakes[0] == 0 and raw_stakes[1] == 0):
+            stakes = [int(raw_stakes[0]), int(raw_stakes[1])]
+            logger.info(f"💰 [STACKS] Using stakes from raw_obs: {stakes}")
+        # Priority 3: Calculate from all_chips - in_chips
+        elif all_chips and len(all_chips) >= 2 and in_chips and len(in_chips) >= 2:
+            stakes = [int(all_chips[0]) - int(in_chips[0]), int(all_chips[1]) - int(in_chips[1])]
+            logger.info(f"💰 [STACKS] Calculated stakes from all_chips - in_chips: {stakes}")
+        # Priority 4: Use all_chips directly if in_chips not available
+        elif all_chips and len(all_chips) >= 2:
+            stakes = [int(all_chips[0]), int(all_chips[1])]
+            logger.info(f"💰 [STACKS] Using all_chips as stakes: {stakes}")
+        # Priority 5: Final fallback - default to 50 BB stacks (100 chips each)
         else:
-            logger.debug(f"💰 [STACKS] Using stakes from raw_obs: {stakes}")
+            big_blind = raw_obs.get('big_blind', 2)
+            default_chips = 100  # 50 BB (RLCard default)
+            stakes = [default_chips, default_chips]
+            logger.warning(f"💰 [STACKS] FALLBACK: Using default 50 BB stacks: {stakes} (raw_stakes={raw_stakes}, all_chips={all_chips}, in_chips={in_chips}, remaining_chips={remaining_chips})")
         
         # Ensure stakes is a list of 2 integers
         if not isinstance(stakes, list) or len(stakes) < 2:
