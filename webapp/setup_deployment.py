@@ -20,6 +20,19 @@ def patch_rlcard_game():
         # Store the original init_game method
         original_init_game = NolimitholdemGame.init_game
 
+        # Store original methods
+        original_init_game = NolimitholdemGame.init_game
+        original_configure = NolimitholdemGame.configure
+        original_step = NolimitholdemGame.step
+        original_get_state = NolimitholdemGame.get_state
+        original_get_legal_actions = NolimitholdemGame.get_legal_actions
+        original_get_num_actions = NolimitholdemGame.get_num_actions
+        original_get_num_players = NolimitholdemGame.get_num_players
+        original_get_payoffs = NolimitholdemGame.get_payoffs
+        original_get_player_id = NolimitholdemGame.get_player_id
+        original_is_over = NolimitholdemGame.is_over
+        original_step_back = getattr(NolimitholdemGame, 'step_back', None)
+
         def patched_init_game(self):
             """
             Initialize the game of no limit holdem with BB-first action order support for heads-up games.
@@ -92,9 +105,22 @@ def patch_rlcard_game():
 
             return state, self.game_pointer
 
-        # Apply the monkey patch
+        # Apply the monkey patches - preserve all original methods
         NolimitholdemGame.init_game = patched_init_game
-        print("Successfully patched NolimitholdemGame.init_game with BB-first action order support")
+        # Keep all other methods from the original game
+        NolimitholdemGame.configure = original_configure
+        NolimitholdemGame.step = original_step
+        NolimitholdemGame.get_state = original_get_state
+        NolimitholdemGame.get_legal_actions = original_get_legal_actions
+        NolimitholdemGame.get_num_actions = original_get_num_actions
+        NolimitholdemGame.get_num_players = original_get_num_players
+        NolimitholdemGame.get_payoffs = original_get_payoffs
+        NolimitholdemGame.get_player_id = original_get_player_id
+        NolimitholdemGame.is_over = original_is_over
+        if original_step_back:
+            NolimitholdemGame.step_back = original_step_back
+
+        print("Successfully patched NolimitholdemGame.init_game with BB-first action order support while preserving all original methods")
 
         return True
 
