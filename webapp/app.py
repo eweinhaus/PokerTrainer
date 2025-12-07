@@ -11,16 +11,8 @@ from datetime import datetime
 import numpy as np
 try:
     import rlcard
-    # Try to import real RLCard components, fallback individually if needed
-    try:
-        from rlcard.agents import RandomAgent
-    except ImportError:
-        from rlcard_mock.agents import RandomAgent
-
-    try:
-        from rlcard.games.nolimitholdem.round import Action
-    except ImportError:
-        from rlcard_mock import Action
+    from rlcard.agents import RandomAgent
+    from rlcard.games.nolimitholdem.round import Action
 except ImportError:
     # Use mock implementation when rlcard is not available
     import sys
@@ -205,10 +197,7 @@ class GameManager:
         env = rlcard.make('no-limit-holdem')
 
         # PATCH: Apply BB-first action order logic to the game
-        # Only patch if we have the real RLCard game object with required methods
-        if (hasattr(env, 'game') and hasattr(env.game, '__class__') and
-            hasattr(env.game, 'init_game') and hasattr(env.game, 'step') and
-            env.game.__class__.__name__ != 'MockGame'):
+        if hasattr(env, 'game') and hasattr(env.game, '__class__'):
             original_init_game = env.game.init_game
             original_step = env.game.step
 
