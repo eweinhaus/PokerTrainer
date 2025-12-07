@@ -212,6 +212,15 @@ class GameManager:
 
         logger.debug(f"Environment created: {type(env)}")
         logger.debug(f"Environment has game attribute: {hasattr(env, 'game')}")
+        
+        # Detailed logging for environment structure debugging
+        if hasattr(env, 'game'):
+            logger.info(f"Environment has game object: {type(env.game)}")
+            logger.info(f"Game has init_game: {hasattr(env.game, 'init_game')}")
+            logger.info(f"Game has step: {hasattr(env.game, 'step')}")
+            logger.info(f"Game has __class__: {hasattr(env.game, '__class__')}")
+        else:
+            logger.warning("Environment does NOT have game attribute")
 
         # PATCH: Apply BB-first action order logic to the game
         # Only patch if the game has the required methods (real RLCard games)
@@ -283,21 +292,37 @@ class GameManager:
                 human_player = env.game.players[0]  # Player 0 is always human
                 if hasattr(human_player, 'hand'):
                     player_hand = list(human_player.hand) if human_player.hand else []
+                    # Log the actual cards being dealt for debugging
+                    logger.info(f"🎴 [CARD_DEAL] Player 0 hand from game.players[0]: {player_hand}")
+                    # Convert to readable format for logging
+                    if player_hand:
+                        try:
+                            card_strs = [convert_card_ints([c])[0] if isinstance(c, (int, type(None))) else str(c) for c in player_hand]
+                            logger.info(f"🎴 [CARD_DEAL] Player 0 hand (readable): {card_strs}")
+                        except:
+                            logger.info(f"🎴 [CARD_DEAL] Player 0 hand (raw): {player_hand}")
             else:
                 # Fallback: if player 0's turn, get from raw_obs
                 initial_raw_obs = state.get('raw_obs', {})
                 if player_id == 0:
                     player_hand = initial_raw_obs.get('hand', [])
+                    logger.info(f"🎴 [CARD_DEAL] Player 0 hand from raw_obs (player_id=0): {player_hand}")
                 else:
                     # If AI goes first, we need to get player 0's hand from the game state
                     # In RLCard, we can get state from player 0's perspective
                     player_0_state = env.get_state(0)
                     player_hand = player_0_state.get('raw_obs', {}).get('hand', [])
-        except Exception:
+                    logger.info(f"🎴 [CARD_DEAL] Player 0 hand from get_state(0) (player_id={player_id}): {player_hand}")
+        except Exception as e:
             # Final fallback
+            logger.warning(f"🎴 [CARD_DEAL] Exception getting player hand: {e}")
             initial_raw_obs = state.get('raw_obs', {})
             if player_id == 0:
                 player_hand = initial_raw_obs.get('hand', [])
+                logger.info(f"🎴 [CARD_DEAL] Player 0 hand from final fallback raw_obs: {player_hand}")
+        
+        # Log final stored hand
+        logger.info(f"🎴 [CARD_DEAL] Final stored player_hand for session {session_id}: {player_hand}")
         
         self.games[session_id] = {
             'env': env,
