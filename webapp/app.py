@@ -231,7 +231,16 @@ class GameManager:
             original_step = env.game.step
 
             def patched_init_game(self):
-                # Call original init_game
+                # FIX: Ensure dealer_id is randomly selected using Python's random module
+                # This fixes the issue where deployment always defaults to the same dealer
+                # because np_random might not be properly seeded in deployment environments
+                import random
+                # Always randomize dealer_id for each new game to ensure proper rotation
+                # Use Python's random module which is properly seeded with system time
+                self.dealer_id = random.choice(range(self.num_players))
+                logger.info(f"🎲 Randomly selected dealer_id: {self.dealer_id} using Python random module")
+                
+                # Call original init_game (it will use our dealer_id if not None, or apply modulo)
                 result = original_init_game()
                 state, current_player = result
 
