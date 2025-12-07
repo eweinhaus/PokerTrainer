@@ -2818,5 +2818,7 @@ def health():
 if __name__ == '__main__':
     debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ('true', '1', 'yes')
     port = int(os.getenv('PORT', '5002'))  # Use 5002 as default instead of 5001
-    logger.info(f"🚀 Starting Flask app on http://127.0.0.1:{port} (debug={debug_mode})")
-    app.run(host='127.0.0.1', port=port, debug=debug_mode)
+    # Use 0.0.0.0 for production deployments (like Render) to bind to all interfaces
+    host = '0.0.0.0' if os.getenv('RENDER') else '127.0.0.1'
+    logger.info(f"🚀 Starting Flask app on http://{host}:{port} (debug={debug_mode})")
+    app.run(host=host, port=port, debug=debug_mode)
