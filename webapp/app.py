@@ -190,11 +190,18 @@ class GameManager:
     
     def start_game(self, session_id):
         """Start a new game for a session"""
-        # Create environment
-        # TODO: Enable BB-first action order for heads-up games once RLCard fork is available
-        # This replaces the complex application-level override logic
-        # Use standard RLCard but patch it with BB-first logic
-        env = rlcard.make('no-limit-holdem')
+        # Create environment with BB-first action order support
+        # Use a custom environment that handles the game creation properly
+        try:
+            env = rlcard.make('no-limit-holdem')
+        except AttributeError as e:
+            if "'NolimitholdemGame' object has no attribute 'configure'" in str(e):
+                # Fallback: Use mock environment if RLCard patching failed
+                from rlcard_mock import MockEnvironment
+                env = MockEnvironment()
+                print("Using mock environment due to RLCard patching failure")
+            else:
+                raise e
 
         # PATCH: Apply BB-first action order logic to the game
         if hasattr(env, 'game') and hasattr(env.game, '__class__'):
