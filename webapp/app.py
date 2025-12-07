@@ -1456,29 +1456,41 @@ class GameManager:
     
     def process_action(self, session_id, action_value):
         """Process a player action"""
+        logger.info(f"🎯 [PROCESS_ACTION] Starting action processing for {session_id}: action={action_value}")
+
         if session_id not in self.games:
             logger.warning(f"❌ [PROCESS_ACTION] Session not found: {session_id}")
             return None
-        
+
         game = self.games[session_id]
         env = game['env']
         state = game['current_state']
         current_player = game['current_player']
         human_agent = game['human_agent']
-        
+
+        logger.debug(f"🎯 [PROCESS_ACTION] Game state: current_player={current_player}, env_type={type(env)}")
+
         # Edge case: Game already over
-        if env.is_over():
-            logger.warning(f"🏁 Attempted action on finished game for session {session_id}")
-            return self.get_game_state(session_id)
-        
+        try:
+            game_over = env.is_over()
+            logger.debug(f"🎯 [PROCESS_ACTION] Game over check: {game_over}")
+            if game_over:
+                logger.warning(f"🏁 Attempted action on finished game for session {session_id}")
+                return self.get_game_state(session_id)
+        except Exception as e:
+            logger.error(f"❌ [PROCESS_ACTION] Error checking if game is over: {e}")
+            logger.error(traceback.format_exc())
+            return None
+
         # Edge case: Not player's turn
         if current_player != 0:
-            logger.warning(f"Attempted action when not player's turn for session {session_id}")
+            logger.warning(f"❌ [PROCESS_ACTION] Attempted action when not player's turn for session {session_id} (current: P{current_player})")
             return self.get_game_state(session_id)
         
         # Get legal actions - try raw_legal_actions first, fallback to legal_actions dict
         raw_legal_actions = state['raw_obs'].get('raw_legal_actions', [])
         legal_actions_dict = state['raw_obs'].get('legal_actions', {})
+        logger.debug(f"🎯 [PROCESS_ACTION] Raw legal actions: {raw_legal_actions}, Legal actions dict: {legal_actions_dict}")
 
         def convert_actions(actions):
             """Convert Action objects to integers"""
@@ -1522,12 +1534,15 @@ class GameManager:
         try:
             rlcard_legal_actions = env.get_legal_actions()
             original_legal_actions = convert_actions(rlcard_legal_actions)
+            logger.debug(f"✅ [PROCESS_ACTION] RLCard legal actions: {rlcard_legal_actions} -> {original_legal_actions}")
         except Exception as e:
             logger.warning(f"⚠️ [PROCESS_ACTION] RLCard legal actions failed ({e}), using fallback")
+            logger.warning(traceback.format_exc())
             # If RLCard doesn't support get_legal_actions, fall back to basic poker actions
             # But ensure we have valid actions - don't rely on potentially empty state data
             if legal_actions_list and len(legal_actions_list) > 0:
                 original_legal_actions = legal_actions_list.copy()
+                logger.debug(f"✅ [PROCESS_ACTION] Using state legal actions: {original_legal_actions}")
             else:
                 # Ultimate fallback: basic poker actions for current stage
                 stage = raw_obs.get('stage', 0)
@@ -1535,6 +1550,7 @@ class GameManager:
                     original_legal_actions = [0, 1, 3, 4]  # FOLD, CHECK_CALL, RAISE_POT, ALL_IN (avoid RAISE_HALF_POT issues)
                 else:  # Postflop
                     original_legal_actions = [0, 1, 2, 3, 4]  # All actions
+                logger.debug(f"✅ [PROCESS_ACTION] Using fallback legal actions for stage {stage}: {original_legal_actions}")
 
         # Get stage and button_id for the fix (same logic as in get_game_state)
         raw_obs = state.get('raw_obs', {})
@@ -1695,7 +1711,15 @@ class GameManager:
             step_action = action  # Pass the action value (int) for _decode_action to convert to Action enum
             raw_action = False  # Let RLCard decode and validate the action
 
-            next_state, next_player_id = env.step(step_action, raw_action)
+            logger.debug(f"🎯 [PROCESS_ACTION] Calling env.step({step_action}, {raw_action})")
+
+            try:
+                next_state, next_player_id = env.step(step_action, raw_action)
+                logger.debug(f"✅ [PROCESS_ACTION] env.step() successful, next_player: {next_player_id}")
+            except Exception as step_error:
+                logger.error(f"❌ [PROCESS_ACTION] env.step() failed: {step_error}")
+                logger.error(traceback.format_exc())
+                raise step_error
 
             # Edge case: Environment error
             if next_state is None:
@@ -1778,23 +1802,36 @@ class GameManager:
     
     def process_ai_turn(self, session_id):
         """Process AI opponent's turn"""
+        logger.info(f"🤖 [AI_TURN] Starting AI turn processing for {session_id}")
+
         if session_id not in self.games:
-            logger.warning(f"Game session not found for AI turn: {session_id}. Available sessions: {list(self.games.keys())}")
+            logger.warning(f"❌ [AI_TURN] Game session not found for AI turn: {session_id}. Available sessions: {list(self.games.keys())}")
             return None
-        
+
         game = self.games[session_id]
         env = game['env']
         state = game['current_state']
         current_player = game['current_player']
         ai_agent = game['ai_agent']
-        
+
+        logger.debug(f"🤖 [AI_TURN] Game state: current_player={current_player}, env_type={type(env)}, ai_agent_type={type(ai_agent)}")
+
         # Edge case: Not AI's turn
         if current_player != 1:
+            logger.warning(f"❌ [AI_TURN] Not AI's turn (current_player={current_player}) for session {session_id}")
             return self.get_game_state(session_id)
-        
+
         # Edge case: Game already over
-        if env.is_over():
-            return self.get_game_state(session_id)
+        try:
+            game_over = env.is_over()
+            logger.debug(f"🤖 [AI_TURN] Game over check: {game_over}")
+            if game_over:
+                logger.info(f"🏁 [AI_TURN] Game already over for session {session_id}")
+                return self.get_game_state(session_id)
+        except Exception as e:
+            logger.error(f"❌ [AI_TURN] Error checking if game is over: {e}")
+            logger.error(traceback.format_exc())
+            return None
         
         try:
             # Add dealer_id to state for position determination
@@ -1831,16 +1868,25 @@ class GameManager:
             logger.info(f"🔍 [AI_TURN] State being passed to AI agent: raw_legal_actions = {state_with_dealer.get('raw_legal_actions', [])}")
 
             # Get AI action
-            action, _ = ai_agent.eval_step(state_with_dealer)
+            logger.debug(f"🤖 [AI_TURN] Calling ai_agent.eval_step() with ai_agent type: {type(ai_agent)}")
+            try:
+                action, _ = ai_agent.eval_step(state_with_dealer)
+                logger.debug(f"✅ [AI_TURN] AI agent returned action: {action} (type: {type(action)})")
+            except Exception as ai_error:
+                logger.error(f"❌ [AI_TURN] AI agent eval_step failed: {ai_error}")
+                logger.error(traceback.format_exc())
+                return None
 
             # Edge case: AI action is None or invalid
             if action is None:
-                logger.warning(f"AI agent returned None action for session {session_id}")
+                logger.warning(f"❌ [AI_TURN] AI agent returned None action for session {session_id}")
                 # Default to fold if action is None
                 legal_actions = state_with_dealer.get('raw_legal_actions', [])
                 if legal_actions and len(legal_actions) > 0:
                     action = legal_actions[0]  # First action is usually fold/check
+                    logger.info(f"🔄 [AI_TURN] Using fallback action: {action}")
                 else:
+                    logger.error(f"❌ [AI_TURN] No legal actions available for fallback")
                     return self.get_game_state(session_id)
 
             # Extract action_value as a Python int (not NumPy array) to avoid boolean ambiguity errors
@@ -1909,11 +1955,19 @@ class GameManager:
                 step_action = action  # Pass the Action enum value
             else:
                 step_action = action_index  # Pass the index into legal actions
-            next_state, next_player_id = env.step(step_action, ai_agent.use_raw)
-            
+            logger.debug(f"🤖 [AI_TURN] Calling env.step({step_action}, {ai_agent.use_raw})")
+
+            try:
+                next_state, next_player_id = env.step(step_action, ai_agent.use_raw)
+                logger.debug(f"✅ [AI_TURN] env.step() successful, next_player: {next_player_id}")
+            except Exception as step_error:
+                logger.error(f"❌ [AI_TURN] env.step() failed: {step_error}")
+                logger.error(traceback.format_exc())
+                return None
+
             # Edge case: Environment error
             if next_state is None:
-                logger.error(f"Environment returned None state for AI turn in session {session_id}")
+                logger.error(f"❌ [AI_TURN] Environment returned None state for AI turn in session {session_id}")
                 return None
             
             # REMOVED: BB-first action order override logic (70+ lines)
