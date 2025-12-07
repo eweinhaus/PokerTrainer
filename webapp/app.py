@@ -214,7 +214,9 @@ class GameManager:
         logger.debug(f"Environment has game attribute: {hasattr(env, 'game')}")
 
         # PATCH: Apply BB-first action order logic to the game
-        if hasattr(env, 'game') and hasattr(env.game, '__class__'):
+        # Only patch if the game has the required methods (real RLCard games)
+        if (hasattr(env, 'game') and hasattr(env.game, '__class__') and
+            hasattr(env.game, 'init_game') and hasattr(env.game, 'step')):
             logger.info("Applying BB-first patches to game...")
             original_init_game = env.game.init_game
             original_step = env.game.step
