@@ -78,7 +78,7 @@ class MockEnvironment:
         }
         return state, 0  # state, current_player
 
-    def step(self, action, raw_action=False):
+    def step(self, action):
         """Take an action and return new state"""
         # Simple mock logic - just switch players and update pot
         current_player = self.game_state['current_player']
