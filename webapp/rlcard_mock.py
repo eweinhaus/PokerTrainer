@@ -3,6 +3,8 @@ Mock implementation of RLCard for development when the real package isn't availa
 This provides minimal functionality to allow the app to start.
 """
 
+import random
+
 class Action:
     """Mock Action class matching RLCard"""
     FOLD = 0
@@ -22,26 +24,45 @@ class MockDealer:
 
 class MockGame:
     def __init__(self):
+        # Deal random cards instead of hardcoded AA
+        hand1, hand2 = self._deal_random_hands()
         self.players = [
-            MockPlayer([0, 13]),  # Player 0: AA
-            MockPlayer([26, 39])  # Player 1: KQs
+            MockPlayer(hand1),
+            MockPlayer(hand2)
         ]
         self.dealer = MockDealer()
         self.dealer_id = 0
+
+    def _deal_random_hands(self):
+        """Deal two random hole cards for each player"""
+        # Create a deck of 52 cards (0-51)
+        deck = list(range(52))
+        random.shuffle(deck)
+
+        # Deal 2 cards to each player
+        return [deck[0], deck[1]], [deck[2], deck[3]]
 
 class MockEnvironment:
     def __init__(self):
         self.num_actions = 5  # Standard poker actions
         self.agents = []
         self.game = MockGame()
-        self.game_state = {
+        # Initialize with proper game state (random cards, 100 BB stacks)
+        self.game_state = self._create_initial_game_state()
+
+    def _create_initial_game_state(self):
+        """Create initial game state with random cards and proper stacks"""
+        # Deal random hands
+        hand1, hand2 = self.game._deal_random_hands()
+
+        return {
             'stage': 0,  # Preflop
             'pot': 3,  # SB + BB in chip units (1 + 2)
             'big_blind': 2,
             'public_cards': [],
-            'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
+            'hands': [hand1, hand2],  # Random hands instead of hardcoded AA
             'raised': [1, 2],  # SB: 1, BB: 2
-            'all_chips': [99, 98],  # Starting chips minus blinds
+            'all_chips': [198, 196],  # 100 BB stacks minus blinds (200-2=198, 200-4=196)
             'current_player': 0
         }
 
@@ -50,16 +71,9 @@ class MockEnvironment:
 
     def reset(self):
         """Reset the game and return initial state"""
-        self.game_state = {
-            'stage': 0,  # Preflop
-            'pot': 3,  # SB + BB in chip units (1 + 2)
-            'big_blind': 2,
-            'public_cards': [],
-            'hands': [[0, 13], [26, 39]],  # Player 0: AA, Player 1: KQs
-            'raised': [1, 2],  # SB: 1, BB: 2
-            'all_chips': [99, 98],  # Starting chips minus blinds
-            'current_player': 0
-        }
+        # Redeal cards for new hand
+        self.game = MockGame()  # Create new game with new random cards
+        self.game_state = self._create_initial_game_state()
 
         # Return state from player 0's perspective
         state = {
