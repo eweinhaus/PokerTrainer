@@ -11,8 +11,16 @@ from datetime import datetime
 import numpy as np
 try:
     import rlcard
-    from rlcard.agents import RandomAgent
-    from rlcard.games.nolimitholdem.round import Action
+    # Try to import real RLCard components, fallback individually if needed
+    try:
+        from rlcard.agents import RandomAgent
+    except ImportError:
+        from rlcard_mock.agents import RandomAgent
+
+    try:
+        from rlcard.games.nolimitholdem.round import Action
+    except ImportError:
+        from rlcard_mock import Action
 except ImportError:
     # Use mock implementation when rlcard is not available
     import sys
