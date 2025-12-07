@@ -173,16 +173,17 @@ class ActionLabeling:
             else:
                 betting_level = 2  # Facing 4-bet or higher
         
+        # Convert all values to Python native types to prevent numpy boolean evaluation errors
         return {
-            'is_preflop': is_preflop,
-            'is_small_blind': is_small_blind,
-            'is_first_to_act': is_first_to_act,
-            'is_facing_bet': is_facing_bet,
-            'betting_level': betting_level,
-            'big_blind': big_blind,
-            'pot': pot,
-            'opponent_raised': opponent_raised,
-            'player_raised': player_raised
+            'is_preflop': bool(is_preflop),
+            'is_small_blind': bool(is_small_blind),
+            'is_first_to_act': bool(is_first_to_act),
+            'is_facing_bet': bool(is_facing_bet),
+            'betting_level': int(betting_level),
+            'big_blind': float(big_blind),
+            'pot': float(pot),
+            'opponent_raised': float(opponent_raised),
+            'player_raised': float(player_raised)
         }
     
     @staticmethod

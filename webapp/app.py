@@ -2031,6 +2031,9 @@ class GameManager:
                         'raised': raw_obs.get('raised', [0, 0])
                     }
                     context = ActionLabeling.get_context_from_state(state_with_processed, player_id=player_id, env=env)
+                    # Convert numpy types to Python native types to prevent boolean evaluation errors
+                    if context:
+                        context = self._convert_numpy_types_in_dict(context)
             except Exception as e:
                 logger.debug(f"Could not extract context for action labeling: {e}")
                 context = None
@@ -2066,6 +2069,39 @@ class GameManager:
         except Exception as e:
             logger.warning(f"Error tracking decision for session {session_id}: {str(e)}")
             # Don't fail the game if tracking fails
+
+    def _convert_numpy_types_in_dict(self, data):
+        """
+        Recursively convert numpy types in a dictionary to Python native types.
+        This prevents numpy boolean evaluation errors when processing hand history data.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        converted = {}
+        for key, value in data.items():
+            try:
+                # Import numpy locally to avoid import issues
+                import numpy as np
+                if isinstance(value, (np.integer, np.int64, np.int32)):
+                    converted[key] = int(value)
+                elif isinstance(value, (np.floating, np.float64)):
+                    converted[key] = float(value)
+                elif isinstance(value, np.bool_):
+                    converted[key] = bool(value)
+                elif isinstance(value, np.ndarray):
+                    converted[key] = value.tolist()
+                elif isinstance(value, dict):
+                    converted[key] = self._convert_numpy_types_in_dict(value)
+                elif isinstance(value, (list, tuple)):
+                    converted[key] = [self._convert_numpy_types_in_dict(item) if isinstance(item, dict) else item for item in value]
+                else:
+                    converted[key] = value
+            except (NameError, AttributeError, ImportError):
+                # numpy not available, just copy the value
+                converted[key] = value
+
+        return converted
 
 # Initialize game manager
 game_manager = GameManager()
@@ -2556,12 +2592,14 @@ def chat():
             # Retrieve hand history for this session
             hand_history = hand_history_storage.get(session_id, [])
             logger.info(f"Chat request for session {session_id}: {len(hand_history)} decisions in hand history")
+            logger.info(f"[HAND_HISTORY_DEBUG] Raw hand_history from storage: {hand_history}")
             if hand_history:
                 # Log sample of hand history structure for debugging
                 sample = hand_history[-1] if len(hand_history) > 0 else {}
                 logger.debug(f"Sample decision structure: {sample}")
                 player_decisions = [d for d in hand_history if d.get('player_id') == 0 or d.get('player_id') == "0" or str(d.get('player_id', '')) == "0"]
                 logger.info(f"Found {len(player_decisions)} player decisions (player_id == 0) in hand history")
+                logger.info(f"[HAND_HISTORY_DEBUG] Player decisions sample: {player_decisions[:2] if player_decisions else 'None'}")
 
                 # Debug logging for hand cards in recent decisions
                 for i, decision in enumerate(hand_history[-5:], 1):  # Last 5 decisions
@@ -2569,7 +2607,20 @@ def chat():
                     player_id = decision.get('player_id')
                     if hand_cards:
                         logger.info(f"[CHAT_DEBUG] Decision {len(hand_history)-5+i}: player_id={player_id}, hand_cards={hand_cards}")
-            
+
+            # Comprehensive logging for chat request
+            logger.info(f"[CHAT_REQUEST] Message: '{message}'")
+            logger.info(f"[CHAT_REQUEST] Session: {session_id}")
+            logger.info(f"[CHAT_REQUEST] Game context: {game_context is not None}")
+            logger.info(f"[CHAT_REQUEST] Hand history: {len(hand_history) if hand_history else 0} decisions")
+
+            if hand_history:
+                player_decisions = [d for d in hand_history if d.get('player_id') == 0 or d.get('player_id') == "0" or str(d.get('player_id', '')) == "0"]
+                logger.info(f"[CHAT_REQUEST] Player decisions: {len(player_decisions)}")
+                if player_decisions:
+                    first_player_decision = player_decisions[0]
+                    logger.info(f"[CHAT_REQUEST] First player decision hand: {first_player_decision.get('hand', [])}")
+
             # Call chatbot coach with timeout handling
             response = chatbot_coach.chat(
                 message=message,

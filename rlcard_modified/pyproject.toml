@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rlcard_modified"
+version = "1.0.0"
+description = "Modified RLCard with BB-first action order support"
+authors = [
+    {name = "AI Poker Coach Team"}
+]
+dependencies = [
+    "rlcard>=1.0.0"
+]
+requires-python = ">=3.6"
+

@@ -22,6 +22,11 @@ env/
 # pytest cache
 .pytest_cache/
 
+# Coverage reports
+htmlcov/
+.coverage
+coverage.xml
+
 # All markdown files except README
 *.md
 !README.md

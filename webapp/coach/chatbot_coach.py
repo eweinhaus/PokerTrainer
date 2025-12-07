@@ -240,15 +240,24 @@ You have access to current game state and hand history when provided. Use this c
             history = self._get_conversation_history(session_id)
 
             # [AI_COACH_LOGGING] Log hand history retrieval from storage
+            print(f"[COACH_DEBUG] Chat request - session: {session_id}, message: '{message[:50]}...'")
+            print(f"[COACH_DEBUG] Hand history provided: {hand_history is not None}, length: {len(hand_history) if hand_history else 0}")
 
             if hand_history:
                 # Log sample of hand history structure for debugging
                 sample_decisions = hand_history[-3:] if len(hand_history) > 3 else hand_history
+                print(f"[COACH_DEBUG] Sample of last {len(sample_decisions)} decisions:")
                 for i, decision in enumerate(sample_decisions):
                     player_id = decision.get('player_id', '?')
                     action = decision.get('action', '?')
                     stage = decision.get('stage', '?')
                     hand = decision.get('hand', [])
+                    board = decision.get('public_cards', [])
+                    print(f"  Decision {len(hand_history)-len(sample_decisions)+i}: player_id={player_id}, action={action}, stage={stage}, hand={hand}, board={board}")
+
+                # Count player decisions
+                player_decisions = [d for d in hand_history if d.get('player_id') == 0 or d.get('player_id') == "0" or str(d.get('player_id', '')) == "0"]
+                print(f"[COACH_DEBUG] Found {len(player_decisions)} player decisions (player_id == 0)")
 
             # Build messages array
             messages = [
@@ -260,7 +269,9 @@ You have access to current game state and hand history when provided. Use this c
             
             # Inject game context and hand history if available and relevant
             context_text = self._inject_context(game_context, hand_history, message)
+            print(f"[COACH_DEBUG] Context text generated: {context_text is not None}, length: {len(context_text) if context_text else 0}")
             if context_text:
+                print(f"[COACH_DEBUG] Context text content:\n{context_text}")
                 messages.append({
                     "role": "system",
                     "content": f"Current game context:\n{context_text}"
@@ -448,29 +459,34 @@ You have access to current game state and hand history when provided. Use this c
             error_details="All retry attempts failed"
         )
     
-    def _inject_context(self, game_context: Optional[Dict[str, Any]], 
+    def _inject_context(self, game_context: Optional[Dict[str, Any]],
                        hand_history: Optional[List[Dict[str, Any]]],
                        message: str) -> Optional[str]:
         """
         Inject game context and hand history into prompt when relevant.
-        
+
         Args:
             game_context: Current game state
             hand_history: List of previous hand decisions
             message: User's message to determine relevance
-        
+
         Returns:
             str: Formatted context text, or None if not relevant
         """
 
+        print(f"[CONTEXT_DEBUG] _inject_context called with message: '{message[:50]}...'")
+        print(f"[CONTEXT_DEBUG] game_context provided: {game_context is not None}")
+        print(f"[CONTEXT_DEBUG] hand_history provided: {hand_history is not None}, length: {len(hand_history) if hand_history else 0}")
+
         message_lower = message.lower()
-        
+
         # Determine if current game context is relevant based on message
         context_relevant_keywords = [
             "current", "now", "this hand", "this situation", "what should",
             "optimal play", "should i"
         ]
         context_relevant = any(keyword in message_lower for keyword in context_relevant_keywords)
+        print(f"[CONTEXT_DEBUG] Context relevant based on keywords: {context_relevant}")
 
 
         context_parts = []
@@ -523,6 +539,7 @@ You have access to current game state and hand history when provided. Use this c
         
         # Always include most recent hand history if available
         if hand_history and len(hand_history) > 0:
+            print(f"[CONTEXT_DEBUG] Processing hand history with {len(hand_history)} decisions")
             hand_history_added = False
 
             # First, try to get player decisions to verify we have data
@@ -533,9 +550,11 @@ You have access to current game state and hand history when provided. Use this c
                 if player_id == 0 or player_id == "0" or str(player_id) == "0":
                     player_decisions_count += 1
 
-            
+            print(f"[CONTEXT_DEBUG] Found {player_decisions_count} player decisions (player_id == 0)")
+
             if player_decisions_count == 0:
                 # Still add a note that hand history exists
+                print(f"[CONTEXT_DEBUG] No player decisions found, adding fallback note")
                 context_parts.append("\nMost Recent Hand:")
                 context_parts.append(f"  (Hand history available with {len(hand_history)} total decisions, but no player decisions found)")
                 hand_history_added = True
@@ -596,6 +615,24 @@ You have access to current game state and hand history when provided. Use this c
                     if player_decisions:
                         context_parts.append("\nMost Recent Hand:")
 
+                        # Extract and clearly state the player's hole cards at the beginning
+                        print(f"[CONTEXT_DEBUG] Extracting hole cards from {len(player_decisions)} player decisions")
+                        player_hole_cards = None
+                        for decision in player_decisions:
+                            hand = decision.get('hand', [])
+                            print(f"  Checking decision: player_id={decision.get('player_id')}, hand={hand}")
+                            if hand:
+                                player_hole_cards = hand
+                                print(f"  Found hole cards: {player_hole_cards}")
+                                break
+
+                        if player_hole_cards:
+                            hole_cards_str = self._format_cards(player_hole_cards)
+                            print(f"[CONTEXT_DEBUG] Formatted hole cards: '{hole_cards_str}'")
+                            context_parts.append(f"Your hole cards: {hole_cards_str}")
+                        else:
+                            print(f"[CONTEXT_DEBUG] WARNING: No hole cards found in player decisions!")
+
                         # Combine and sort all decisions by their order in the hand
                         all_hand_decisions = []
                         for d in most_recent_hand_decisions:
@@ -626,9 +663,21 @@ You have access to current game state and hand history when provided. Use this c
                                 hand_str = self._format_cards(hand_cards) if hand_cards else ""
                                 board_str = self._format_cards(board_cards) if board_cards else ""
 
-                                # Get position if available
-                                position = decision.get('position')
-                                position_str = f", Position: {position}" if position else ""
+                                # Extract position information from decision context
+                                decision_context = decision.get('context', {})
+                                position_parts = []
+
+                                if decision_context.get('is_small_blind'):
+                                    position_parts.append("SB")
+                                else:
+                                    position_parts.append("BB")
+
+                                if decision_context.get('is_first_to_act'):
+                                    position_parts.append("first to act")
+                                else:
+                                    position_parts.append("facing bet")
+
+                                position_str = f", Position: {' '.join(position_parts)}" if position_parts else ""
 
                                 # Determine if this is a player or opponent action
                                 is_player_action = (player_id == 0 or player_id == "0" or str(player_id) == "0")
@@ -683,10 +732,23 @@ You have access to current game state and hand history when provided. Use this c
 
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
-                                    position = decision.get('position')
+                                    # Extract position information from decision context
+                                    decision_context = decision.get('context', {})
+                                    position_parts = []
+
+                                    if decision_context.get('is_small_blind'):
+                                        position_parts.append("SB")
+                                    else:
+                                        position_parts.append("BB")
+
+                                    if decision_context.get('is_first_to_act'):
+                                        position_parts.append("first to act")
+                                    else:
+                                        position_parts.append("facing bet")
+
+                                    position_str = f", Position: {' '.join(position_parts)}" if position_parts else ""
                                     hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                                     board_str = self._format_cards(board_cards) if board_cards else "No board"
-                                    position_str = f", Position: {position}" if position else ""
 
                                     # Determine if this is a player or opponent action
                                     is_player_action = (player_id == 0 or player_id == "0" or str(player_id) == "0")
@@ -737,10 +799,23 @@ You have access to current game state and hand history when provided. Use this c
                                     
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
-                                    position = decision.get('position')
+                                    # Extract position information from decision context
+                                    decision_context = decision.get('context', {})
+                                    position_parts = []
+
+                                    if decision_context.get('is_small_blind'):
+                                        position_parts.append("SB")
+                                    else:
+                                        position_parts.append("BB")
+
+                                    if decision_context.get('is_first_to_act'):
+                                        position_parts.append("first to act")
+                                    else:
+                                        position_parts.append("facing bet")
+
+                                    position_str = f", Position: {' '.join(position_parts)}" if position_parts else ""
                                     hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                                     board_str = self._format_cards(board_cards) if board_cards else "No board"
-                                    position_str = f", Position: {position}" if position else ""
                                     context_parts.append(
                                         f"  {i}. {stage_map.get(stage_int, 'Unknown')}: {action_map.get(action_int, 'Unknown')} "
                                         f"(Hand: {hand_str}, Board: {board_str}{position_str})"
@@ -778,14 +853,14 @@ You have access to current game state and hand history when provided. Use this c
         
         result = "\n".join(context_parts)
 
-        # Log the context being sent for debugging
-
         # Limit total context size to prevent overly long prompts (max 2000 chars)
         # This helps prevent timeout issues with very large prompts
         max_context_length = 2000
         if len(result) > max_context_length:
             result = result[:max_context_length] + "\n... (context truncated for performance)"
 
+        print(f"[CONTEXT_DEBUG] Final context result length: {len(result)}")
+        print(f"[CONTEXT_DEBUG] Final context result:\n{result}")
         return result
     
     def _format_hand_history_simple(self, hand_history: List[Dict[str, Any]]) -> Optional[str]:
@@ -817,7 +892,21 @@ You have access to current game state and hand history when provided. Use this c
                 hand_cards = decision.get('hand', [])
                 board_cards = decision.get('public_cards', [])
                 pot = decision.get('pot', 0)
-                position = decision.get('position')
+                # Extract position information from decision context
+                decision_context = decision.get('context', {})
+                position_parts = []
+
+                if decision_context.get('is_small_blind'):
+                    position_parts.append("SB")
+                else:
+                    position_parts.append("BB")
+
+                if decision_context.get('is_first_to_act'):
+                    position_parts.append("first to act")
+                else:
+                    position_parts.append("facing bet")
+
+                position_str = f", Position: {' '.join(position_parts)}" if position_parts else ""
 
                 action_map = {0: "Fold", 1: "Check/Call", 2: "Raise ½ Pot", 3: "Raise Pot", 4: "All-In"}
                 stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
@@ -826,7 +915,6 @@ You have access to current game state and hand history when provided. Use this c
                 stage_name = stage_map.get(stage, f"Stage {stage}")
                 hand_str = self._format_cards(hand_cards) if hand_cards else "Unknown"
                 board_str = self._format_cards(board_cards) if board_cards else "No board"
-                position_str = f", Position: {position}" if position else ""
 
                 # Debug logging for hand cards
                 if hand_cards:
@@ -844,12 +932,12 @@ You have access to current game state and hand history when provided. Use this c
     def _convert_numpy_type(self, value: Any) -> Any:
         """
         Safely convert numpy types to Python native types.
-        
+
         Args:
             value: Value that might be a numpy type
-        
+
         Returns:
-            Python native type (int, float, or original value)
+            Python native type (int, float, bool, or original value)
         """
         try:
             # Import numpy at function level to avoid scoping issues
@@ -858,13 +946,20 @@ You have access to current game state and hand history when provided. Use this c
                 return int(value)
             elif isinstance(value, (np_local.floating, np_local.float64)):
                 return float(value)
+            elif isinstance(value, np_local.bool_):
+                return bool(value)
+            elif isinstance(value, np_local.ndarray):
+                # Convert numpy arrays to lists to prevent boolean evaluation errors
+                return value.tolist()
             else:
                 return value
         except (NameError, AttributeError, ImportError, TypeError):
             # numpy not available, types don't exist, or conversion failed - return as-is
-            # Try basic int/float conversion as fallback
+            # Try basic int/float/bool conversion as fallback
             try:
-                if isinstance(value, (int, float)):
+                if isinstance(value, bool):
+                    return bool(value)
+                elif isinstance(value, (int, float)):
                     return int(value) if isinstance(value, (int, float)) and not isinstance(value, float) else float(value)
                 return value
             except (ValueError, TypeError):
@@ -875,10 +970,10 @@ You have access to current game state and hand history when provided. Use this c
         Format card indices or strings to readable string.
 
         Args:
-            cards: List of card indices from RLCard (0-51) or card strings ('SK', 'C5')
+            cards: List of card indices from RLCard (0-51) or card strings ('AH', '9S')
 
         Returns:
-            str: Formatted card string (e.g., "A♠ K♥")
+            str: Formatted card string (e.g., "A♥ 9♠")
         """
         if not cards:
             return ""
@@ -890,9 +985,9 @@ You have access to current game state and hand history when provided. Use this c
         formatted_cards = []
         for card in cards:
             if isinstance(card, str):
-                # Handle string cards like 'SK', 'C5' (Suit first, then Rank)
+                # Handle string cards like 'AH', '9S' (Rank first, then Suit)
                 if len(card) == 2:
-                    suit_char, rank_char = card[0], card[1]
+                    rank_char, suit_char = card[0], card[1]
                     # Map rank character to index
                     rank_map = {'2': 1, '3': 2, '4': 3, '5': 4, '6': 5, '7': 6, '8': 7, '9': 8, 'T': 9, 'J': 10, 'Q': 11, 'K': 12, 'A': 0}
                     suit_map = {'S': 0, 'H': 1, 'D': 2, 'C': 3}
