@@ -230,19 +230,26 @@ class GameManager:
             original_init_game = env.game.init_game
             original_step = env.game.step
 
-            def patched_init_game(self):
+            # Create wrapper functions that properly handle self parameter
+            def patched_init_game_wrapper(self):
                 # FIX: Ensure dealer_id is randomly selected using Python's random module
                 # This fixes the issue where deployment always defaults to the same dealer
                 # because np_random might not be properly seeded in deployment environments
                 import random
-                # Always randomize dealer_id for each new game to ensure proper rotation
-                # Use Python's random module which is properly seeded with system time
-                self.dealer_id = random.choice(range(self.num_players))
-                logger.info(f"🎲 Randomly selected dealer_id: {self.dealer_id} using Python random module")
                 
-                # Call original init_game (it will use our dealer_id if not None, or apply modulo)
+                # Set dealer_id to a random value BEFORE calling original_init_game
+                # The original code checks: if dealer_id is None, use np_random.choice, else use modulo
+                # By setting it to a non-None value, we bypass the np_random.choice call
+                random_dealer_id = random.choice(range(self.num_players))
+                self.dealer_id = random_dealer_id
+                logger.info(f"🎲 [DEALER_FIX] Set dealer_id to {self.dealer_id} using Python random module (before init_game)")
+                
+                # Call original init_game (it will use our dealer_id and apply modulo if needed)
                 result = original_init_game()
                 state, current_player = result
+                
+                # Log the final dealer_id after init_game
+                logger.info(f"🎲 [DEALER_FIX] Final dealer_id after init_game: {self.dealer_id}")
 
                 # Apply BB-first logic for 2-player games
                 if self.num_players == 2:
@@ -252,7 +259,7 @@ class GameManager:
 
                 return result
 
-            def patched_step(self, action):
+            def patched_step_wrapper(self, action):
                 # Call original step
                 result = original_step(action)
                 next_state, next_player_id = result
@@ -266,9 +273,10 @@ class GameManager:
 
                 return result
 
-            # Monkey patch the methods
-            env.game.init_game = lambda: patched_init_game(env.game)
-            env.game.step = lambda action: patched_step(env.game, action)
+            # Monkey patch the methods - bind properly to preserve self
+            import types
+            env.game.init_game = types.MethodType(patched_init_game_wrapper, env.game)
+            env.game.step = types.MethodType(patched_step_wrapper, env.game)
             logger.info("BB-first patches applied successfully")
         else:
             logger.info("Skipping BB-first patches - not a standard RLCard environment")
