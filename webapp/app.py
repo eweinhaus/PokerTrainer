@@ -570,11 +570,43 @@ class GameManager:
         pot = calculate_pot_from_state(modified_raw_obs, env)
         pot_bb = pot_to_bb(pot, raw_obs.get('big_blind', 2))
 
+        # Calculate remaining stacks (stakes)
+        # RLCard provides 'stakes' as remaining chips, but it might not always be populated
+        # Fallback: Calculate from all_chips - in_chips, or use default 100 BB stacks
+        stakes = raw_obs.get('stakes', None)
+        all_chips = raw_obs.get('all_chips', None)
+        
+        if stakes is None or (isinstance(stakes, list) and len(stakes) >= 2 and stakes[0] == 0 and stakes[1] == 0):
+            # stakes not available or all zeros, try to calculate from all_chips
+            if all_chips and len(all_chips) >= 2 and in_chips and len(in_chips) >= 2:
+                # Calculate remaining stacks: starting chips - chips bet this hand
+                stakes = [int(all_chips[0]) - int(in_chips[0]), int(all_chips[1]) - int(in_chips[1])]
+                logger.debug(f"💰 [STACKS] Calculated stakes from all_chips - in_chips: {stakes}")
+            elif all_chips and len(all_chips) >= 2:
+                # Use all_chips directly if in_chips not available
+                stakes = [int(all_chips[0]), int(all_chips[1])]
+                logger.debug(f"💰 [STACKS] Using all_chips as stakes: {stakes}")
+            else:
+                # Final fallback: Default to 100 BB stacks (200 chips each)
+                big_blind = raw_obs.get('big_blind', 2)
+                default_chips = 200  # 100 BB
+                stakes = [default_chips, default_chips]
+                logger.warning(f"💰 [STACKS] Using default 100 BB stacks: {stakes} (all_chips={all_chips}, in_chips={in_chips})")
+        else:
+            logger.debug(f"💰 [STACKS] Using stakes from raw_obs: {stakes}")
+        
+        # Ensure stakes is a list of 2 integers
+        if not isinstance(stakes, list) or len(stakes) < 2:
+            big_blind = raw_obs.get('big_blind', 2)
+            default_chips = 200  # 100 BB
+            stakes = [default_chips, default_chips]
+            logger.warning(f"💰 [STACKS] Invalid stakes format, using default: {stakes}")
+
         # Build game state response
         game_state = {
             'hand': player_hand,  # Use stored player hand, not raw_obs hand
             'public_cards': raw_obs.get('public_cards', []),
-            'stakes': raw_obs.get('stakes', [0, 0]),
+            'stakes': stakes,  # Use calculated stakes instead of raw_obs.get('stakes', [0, 0])
             'pot': pot,  # Use calculated pot instead of raw_obs pot
             'stage': stage,
             'legal_actions': legal_actions,
@@ -587,6 +619,7 @@ class GameManager:
             'dealer_id': dealer_id,
             'raised': raised,
             'in_chips': in_chips,  # Total chips each player has put in this hand
+            'all_chips': raw_obs.get('all_chips', [200, 200]),  # Starting chips (for debugging)
             'action_history': self._build_action_history(env, state, session_id),  # Legacy format
             'hand_events': [event.to_dict() for event in game.get('hand_events', [])],  # New event-based format
             'payoffs': env.get_payoffs() if env.is_over() else None,
