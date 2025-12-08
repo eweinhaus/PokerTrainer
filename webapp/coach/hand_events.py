@@ -72,3 +72,4 @@ class HandEvent:
             bet_amount=data.get('bet_amount')
         )
 
+

@@ -139,6 +139,93 @@ def convert_numpy_types(obj):
         return [convert_numpy_types(item) for item in obj]
     return obj
 
+def safe_int_convert(value, default=0):
+    """Safely convert a value to int, handling NumPy arrays and None values.
+    
+    This function prevents "The truth value of an array with more than one element is ambiguous" errors
+    by properly handling NumPy arrays before boolean checks.
+    
+    Args:
+        value: The value to convert (can be int, NumPy array, None, etc.)
+        default: Default value to return if conversion fails or value is None/empty
+    
+    Returns:
+        int: The converted integer value
+    """
+    if value is None:
+        return default
+    
+    # Handle NumPy arrays first (before any boolean checks)
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return default
+        # Extract scalar value from array
+        try:
+            return int(value.item())
+        except (ValueError, OverflowError):
+            # If item() fails, try indexing
+            return int(value[0]) if value.size > 0 else default
+    
+    # Handle NumPy scalar types
+    if isinstance(value, (np.integer, np.floating)):
+        return int(value)
+    
+    # Handle objects with .value attribute (enums, etc.)
+    if hasattr(value, 'value'):
+        return safe_int_convert(value.value, default)
+    
+    # For regular Python types, check if truthy before converting
+    # This is safe now because we've already handled arrays
+    try:
+        if value:
+            return int(value)
+        else:
+            return default
+    except (ValueError, TypeError):
+        return default
+
+
+def safe_bool_convert(value, default=False):
+    """Safely convert a value to bool, handling NumPy arrays and None values.
+    
+    This function prevents "The truth value of an array with more than one element is ambiguous" errors
+    by properly handling NumPy arrays before boolean checks.
+    
+    Args:
+        value: The value to convert (can be bool, NumPy array, None, etc.)
+        default: Default value to return if conversion fails or value is None/empty
+    
+    Returns:
+        bool: The converted boolean value
+    """
+    if value is None:
+        return default
+    
+    # Handle NumPy arrays first (before any boolean checks)
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return default
+        # Extract scalar value from array and convert to bool
+        try:
+            return bool(value.item())
+        except (ValueError, OverflowError):
+            # If item() fails, try indexing
+            return bool(value[0]) if value.size > 0 else default
+    
+    # Handle NumPy scalar types
+    if isinstance(value, (np.integer, np.floating, np.bool_)):
+        return bool(value)
+    
+    # Handle objects with .value attribute (enums, etc.)
+    if hasattr(value, 'value'):
+        return safe_bool_convert(value.value, default)
+    
+    # For regular Python types, convert to bool
+    try:
+        return bool(value)
+    except (ValueError, TypeError):
+        return default
+
 
 class WebHumanAgent:
     """Simple human agent for web interface that doesn't block"""
@@ -387,7 +474,7 @@ class GameManager:
         if hasattr(current_stage, 'value'):
             current_stage = current_stage.value
         elif not isinstance(current_stage, int):
-            current_stage = int(current_stage) if current_stage else 0
+            current_stage = safe_int_convert(current_stage, 0)
 
         # Detect community card deals and emit events
         last_public_cards_count = game.get('last_public_cards_count', 0)
@@ -420,19 +507,24 @@ class GameManager:
 
         # Track if game is over for next iteration
         was_over = game.get('was_over', False)
-        is_over = env.is_over()
+        is_over = safe_bool_convert(env.is_over())
         game['was_over'] = is_over
         
         # Detect hand end and emit win event
         if is_over and not was_over:
             # Hand just ended, emit win event
             payoffs = env.get_payoffs() if hasattr(env, 'get_payoffs') else None
-            if payoffs:
+            if payoffs is not None and len(payoffs) > 0:
                 # Find winner (player with positive payoff)
                 for player_id, payoff in enumerate(payoffs):
-                    if payoff > 0:
+                    # Convert payoff to native Python type to avoid numpy comparison issues
+                    payoff_value = float(payoff) if hasattr(payoff, '__float__') else payoff
+                    if payoff_value > 0:
                         big_blind = raw_obs.get('big_blind', 2)
                         pot = raw_obs.get('pot', 0)
+                        # Convert to int to avoid array comparison errors
+                        big_blind = safe_int_convert(big_blind, 2)
+                        pot = safe_int_convert(pot, 0)
                         pot_bb = pot / big_blind if big_blind > 0 else 0
                         self._emit_win_event(session_id, player_id, pot_bb)
                         break
@@ -540,22 +632,29 @@ class GameManager:
         if hasattr(stage, 'value'):
             stage = stage.value
         elif not isinstance(stage, int):
-            stage = int(stage) if stage else 0
+            stage = safe_int_convert(stage, 0)
 
         # Get dealer_id from game object (not in raw_obs)
         dealer_id = None
         if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
             dealer_id = env.game.dealer_id
+            # Convert to int to avoid NumPy array comparison errors
+            dealer_id = safe_int_convert(dealer_id, None)
 
         # Calculate button_id (small blind in heads-up)
         button_id = None
         if dealer_id is not None:
             button_id = (dealer_id + 1) % 2  # In HUNL, button = (dealer + 1) % 2
+            # Convert to int to avoid NumPy array comparison errors
+            button_id = safe_int_convert(button_id, None)
+
+        # Convert current_player to int to avoid NumPy array comparison errors
+        current_player = safe_int_convert(current_player, 0)
 
         # Fix for small blind first to act preflop - ensure standard raise options are available
         if (stage == 0 and  # Preflop
             current_player == 0 and  # Human player
-            not env.is_over() and
+            not safe_bool_convert(env.is_over()) and
             button_id == 0):  # Human is SB (button_id represents SB position)
 
             # Small blind should always be able to make standard preflop raises
@@ -660,8 +759,8 @@ class GameManager:
             'legal_actions': legal_actions,
             'raw_legal_actions': raw_legal_actions,
             'current_player': current_player,
-            'is_waiting_for_action': not env.is_over() and current_player == 0,
-            'is_over': env.is_over(),
+            'is_waiting_for_action': not safe_bool_convert(env.is_over()) and current_player == 0,
+            'is_over': safe_bool_convert(env.is_over()),
             'big_blind': raw_obs.get('big_blind', 2),
             'button_id': button_id,
             'dealer_id': dealer_id,
@@ -670,8 +769,8 @@ class GameManager:
             'all_chips': raw_obs.get('all_chips', [100, 100]),  # Starting chips (50 BB each, for debugging)
             'action_history': self._build_action_history(env, state, session_id),  # Legacy format
             'hand_events': [event.to_dict() for event in game.get('hand_events', [])],  # New event-based format
-            'payoffs': env.get_payoffs() if env.is_over() else None,
-            'opponent_hand': self._get_opponent_hand(env) if env.is_over() else None
+            'payoffs': env.get_payoffs() if safe_bool_convert(env.is_over()) else None,
+            'opponent_hand': self._get_opponent_hand(env) if safe_bool_convert(env.is_over()) else None
         }
         
         # Convert numpy types to native Python types for JSON serialization first
@@ -701,6 +800,9 @@ class GameManager:
         # Final pot recalculation using reconstructed raised array (already done above, but ensure consistency)
         # The pot was already calculated with reconstructed raised array above, so this is just for logging
         final_pot = calculate_pot(raised, game_state.get('big_blind', 2), dealer_id, stage)
+        # Convert to int to avoid array comparison errors
+        final_pot = safe_int_convert(final_pot, 0)
+        pot = safe_int_convert(pot, 0)
         if final_pot > 0 and final_pot != pot:
             game_state['pot'] = final_pot
         else:
@@ -914,8 +1016,10 @@ class GameManager:
     
     def _emit_action_event(self, session_id, player_id, action_value, state, next_state, bet_amount=None):
         """Emit an action event when a player takes an action"""
+        logger.info(f"🔍 [EMIT_ACTION_EVENT] Starting - session_id={session_id}, player_id={player_id}, action_value={action_value}")
         try:
             if session_id not in self.games:
+                logger.warning(f"🔍 [EMIT_ACTION_EVENT] Session not in games, returning")
                 return
             
             game = self.games[session_id]
@@ -924,31 +1028,59 @@ class GameManager:
             
             env = game.get('env')
             if not env:
+                logger.warning(f"🔍 [EMIT_ACTION_EVENT] No env, returning")
                 return
             
             # Get stage
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 1: Getting stage...")
             raw_obs = state.get('raw_obs', {})
             stage = raw_obs.get('stage', 0)
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 1a: stage (raw)={stage} (type: {type(stage)})")
             if hasattr(stage, 'value'):
                 stage = stage.value
+                logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 1b: stage.value={stage}")
             elif not isinstance(stage, int):
-                stage = int(stage) if stage else 0
+                stage = safe_int_convert(stage, 0)
+                logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 1c: converted stage={stage}")
             
             stage_names = {0: 'preflop', 1: 'flop', 2: 'turn', 3: 'river'}
             stage_name = stage_names.get(stage, 'preflop')
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 1: Final stage_name={stage_name}")
             
             # Get pot after action
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 2: Getting pot...")
             next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
             pot = next_raw_obs.get('pot', raw_obs.get('pot', 0))
-            pot = float(pot) if pot else 0.0
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 2a: pot (raw)={pot} (type: {type(pot)})")
+            try:
+                pot = float(pot) if pot else 0.0
+                logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 2b: pot (converted)={pot}")
+            except Exception as e:
+                logger.error(f"❌ [EMIT_ACTION_EVENT] Step 2: Error converting pot: {e}")
+                pot = 0.0
             
             # Get context for action labeling
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 3: Getting context for action labeling...")
             game_state = {'raw_obs': raw_obs}
-            context = ActionLabeling.get_context_from_state(game_state, player_id, env)
+            try:
+                context = ActionLabeling.get_context_from_state(game_state, player_id, env)
+                logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 3a: Got context: {context}")
+            except Exception as e:
+                logger.error(f"❌ [EMIT_ACTION_EVENT] Step 3: Error getting context: {e}")
+                logger.error(traceback.format_exc())
+                context = {}
             
             # Generate action label
-            label = ActionLabeling.get_action_label(action_value, context, bet_amount)
-            logger.debug(f"📊 [ACTION_LABEL] action_value={action_value}, bet_amount={bet_amount}, is_facing_bet={context.get('is_facing_bet', False)}, label={label}")
+            logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 4: Generating action label...")
+            try:
+                label = ActionLabeling.get_action_label(action_value, context, bet_amount)
+                logger.info(f"🔍 [EMIT_ACTION_EVENT] Step 4a: Generated label: {label}")
+            except Exception as e:
+                logger.error(f"❌ [EMIT_ACTION_EVENT] Step 4: Error generating label: {e}")
+                logger.error(traceback.format_exc())
+                label = f"Action {action_value}"
+            
+            logger.info(f"📊 [EMIT_ACTION_EVENT] action_value={action_value}, bet_amount={bet_amount}, is_facing_bet={context.get('is_facing_bet', False) if context else 'N/A'}, label={label}")
             
             # Create and emit event
             event = HandEvent(
@@ -1063,7 +1195,7 @@ class GameManager:
         if hasattr(current_stage, 'value'):
             current_stage = current_stage.value
         elif not isinstance(current_stage, int):
-            current_stage = int(current_stage) if current_stage else 0
+            current_stage = safe_int_convert(current_stage, 0)
         
         # Get public cards count to determine betting round
         public_cards = raw_obs.get('public_cards', [])
@@ -1208,7 +1340,7 @@ class GameManager:
         if hasattr(current_stage, 'value'):
             current_stage = current_stage.value
         elif not isinstance(current_stage, int):
-            current_stage = int(current_stage) if current_stage else 0
+            current_stage = safe_int_convert(current_stage, 0)
         
         # Get public cards count to determine betting round
         public_cards = raw_obs.get('public_cards', [])
@@ -1439,7 +1571,7 @@ class GameManager:
                     if hasattr(stage, 'value'):
                         stage = stage.value
                     elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
+                        stage = safe_int_convert(stage, 0)
 
                     big_blind = raw_obs.get('big_blind', 2)
                     player_raised = raised[player_id] if player_id is not None and player_id < len(raised) else 0
@@ -1487,7 +1619,7 @@ class GameManager:
                     if hasattr(stage, 'value'):
                         stage = stage.value
                     elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
+                        stage = safe_int_convert(stage, 0)
                     
                     # Check if we're in preflop (stage == 0)
                     if stage == 0:
@@ -1512,6 +1644,7 @@ class GameManager:
                 pass
             
             # Fallback to standard calculation
+            pot = safe_int_convert(pot, 0)
             return int(pot / 2) if pot > 0 else 0
         elif action_value == 3:  # Raise Pot
             # Special handling for preflop 3bet
@@ -1522,7 +1655,7 @@ class GameManager:
                     if hasattr(stage, 'value'):
                         stage = stage.value
                     elif not isinstance(stage, int):
-                        stage = int(stage) if stage else 0
+                        stage = safe_int_convert(stage, 0)
                     
                     # Check if we're in preflop (stage == 0)
                     if stage == 0:
@@ -1554,7 +1687,7 @@ class GameManager:
     
     def _get_opponent_hand(self, env):
         """Get opponent's hand when game is over"""
-        if env.is_over():
+        if safe_bool_convert(env.is_over()):
             perfect_info = env.get_perfect_information()
             if 'hand_cards' in perfect_info and len(perfect_info['hand_cards']) > 1:
                 return perfect_info['hand_cards'][1]
@@ -1562,7 +1695,8 @@ class GameManager:
     
     def process_action(self, session_id, action_value):
         """Process a player action"""
-        logger.info(f"🎯 [PROCESS_ACTION] Starting action processing for {session_id}: action={action_value}")
+        is_fold = (action_value == 0)
+        logger.info(f"🎯 [PROCESS_ACTION] Starting action processing for {session_id}: action={action_value} {'[FOLD]' if is_fold else ''}")
 
         if session_id not in self.games:
             logger.warning(f"❌ [PROCESS_ACTION] Session not found: {session_id}")
@@ -1572,31 +1706,44 @@ class GameManager:
         env = game['env']
         state = game['current_state']
         current_player = game['current_player']
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 1: Initial state - current_player (raw)={current_player} (type: {type(current_player)})")
+        
+        # Convert to int to avoid NumPy array comparison errors
+        current_player = safe_int_convert(current_player, 0)
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 2: Converted current_player={current_player} (type: {type(current_player)})")
+        
         human_agent = game['human_agent']
 
-        logger.debug(f"🎯 [PROCESS_ACTION] Game state: current_player={current_player}, env_type={type(env)}")
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 3: Game state - current_player={current_player}, env_type={type(env)}, action_value={action_value}")
 
         # Edge case: Game already over
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 4: Checking if game is over...")
         try:
-            game_over = env.is_over()
-            logger.debug(f"🎯 [PROCESS_ACTION] Game over check: {game_over}")
+            is_over_raw = env.is_over()
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 4a: env.is_over() raw result: {is_over_raw} (type: {type(is_over_raw)})")
+            game_over = safe_bool_convert(is_over_raw)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 4b: Converted game_over: {game_over} (type: {type(game_over)})")
             if game_over:
-                logger.warning(f"🏁 Attempted action on finished game for session {session_id}")
+                logger.warning(f"🏁 [FOLD_WORKFLOW] Game already over, returning game state")
                 return self.get_game_state(session_id)
         except Exception as e:
-            logger.error(f"❌ [PROCESS_ACTION] Error checking if game is over: {e}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Error checking if game is over: {e}")
             logger.error(traceback.format_exc())
             return None
 
         # Edge case: Not player's turn
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 5: Checking if it's player's turn... current_player={current_player}")
         if current_player != 0:
-            logger.warning(f"❌ [PROCESS_ACTION] Attempted action when not player's turn for session {session_id} (current: P{current_player})")
+            logger.warning(f"❌ [FOLD_WORKFLOW] Not player's turn (current: P{current_player})")
             return self.get_game_state(session_id)
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 5: ✓ It's player's turn")
         
         # Get legal actions - try raw_legal_actions first, fallback to legal_actions dict
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 6: Getting legal actions from state...")
         raw_legal_actions = state['raw_obs'].get('raw_legal_actions', [])
         legal_actions_dict = state['raw_obs'].get('legal_actions', {})
-        logger.debug(f"🎯 [PROCESS_ACTION] Raw legal actions: {raw_legal_actions}, Legal actions dict: {legal_actions_dict}")
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 6a: raw_legal_actions={raw_legal_actions} (type: {type(raw_legal_actions)})")
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 6b: legal_actions_dict={legal_actions_dict} (type: {type(legal_actions_dict)})")
 
         def convert_actions(actions):
             """Convert Action objects to integers"""
@@ -1625,38 +1772,49 @@ class GameManager:
             return result
 
         # Convert legal_actions dict to list if needed
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 7: Converting legal actions...")
         legal_actions_list = []
         if raw_legal_actions and len(raw_legal_actions) > 0:
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 7a: Using raw_legal_actions, converting...")
             legal_actions_list = convert_actions(raw_legal_actions)  # Convert Action enums to integers
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 7a: Converted legal_actions_list={legal_actions_list}")
         elif legal_actions_dict:
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 7b: Using legal_actions_dict, converting...")
             # Convert dict keys to list
             if isinstance(legal_actions_dict, dict):
                 legal_actions_list = convert_actions(list(legal_actions_dict.keys()))
             elif isinstance(legal_actions_dict, list):
                 legal_actions_list = convert_actions(legal_actions_dict)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 7b: Converted legal_actions_list={legal_actions_list}")
+        else:
+            logger.warning(f"🔍 [FOLD_WORKFLOW] Step 7c: No legal actions found in state!")
 
         # Get the TRUE legal actions directly from RLCard environment
         # This is critical because RLCard's env.step() will only accept actions that env.get_legal_actions() returns
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 8: Getting RLCard legal actions from environment...")
         try:
             rlcard_legal_actions = env.get_legal_actions()
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 8a: env.get_legal_actions() returned: {rlcard_legal_actions} (type: {type(rlcard_legal_actions)})")
             original_legal_actions = convert_actions(rlcard_legal_actions)
-            logger.debug(f"✅ [PROCESS_ACTION] RLCard legal actions: {rlcard_legal_actions} -> {original_legal_actions}")
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 8b: Converted original_legal_actions={original_legal_actions}")
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 8c: Checking if fold (0) is in legal actions: {0 in original_legal_actions}")
         except Exception as e:
-            logger.warning(f"⚠️ [PROCESS_ACTION] RLCard legal actions failed ({e}), using fallback")
+            logger.warning(f"⚠️ [FOLD_WORKFLOW] Step 8: RLCard legal actions failed ({e}), using fallback")
             logger.warning(traceback.format_exc())
             # If RLCard doesn't support get_legal_actions, fall back to basic poker actions
             # But ensure we have valid actions - don't rely on potentially empty state data
             if legal_actions_list and len(legal_actions_list) > 0:
                 original_legal_actions = legal_actions_list.copy()
-                logger.debug(f"✅ [PROCESS_ACTION] Using state legal actions: {original_legal_actions}")
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 8: Using state legal actions: {original_legal_actions}")
             else:
                 # Ultimate fallback: basic poker actions for current stage
+                raw_obs = state.get('raw_obs', {})
                 stage = raw_obs.get('stage', 0)
                 if stage == 0:  # Preflop
                     original_legal_actions = [0, 1, 3, 4]  # FOLD, CHECK_CALL, RAISE_POT, ALL_IN (avoid RAISE_HALF_POT issues)
                 else:  # Postflop
                     original_legal_actions = [0, 1, 2, 3, 4]  # All actions
-                logger.debug(f"✅ [PROCESS_ACTION] Using fallback legal actions for stage {stage}: {original_legal_actions}")
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 8: Using fallback legal actions for stage {stage}: {original_legal_actions}")
 
         # Get stage and button_id for the fix (same logic as in get_game_state)
         raw_obs = state.get('raw_obs', {})
@@ -1664,29 +1822,78 @@ class GameManager:
         if hasattr(stage, 'value'):
             stage = stage.value
         elif not isinstance(stage, int):
-            stage = int(stage) if stage else 0
+            stage = safe_int_convert(stage, 0)
 
         # Get dealer_id from game object (not in raw_obs)
         dealer_id = None
         if hasattr(env, 'game') and hasattr(env.game, 'dealer_id'):
             dealer_id = env.game.dealer_id
+            logger.debug(f"🔍 [PROCESS_ACTION] Raw dealer_id: {dealer_id} (type: {type(dealer_id)})")
+            # Convert to int to avoid NumPy array comparison errors
+            dealer_id = safe_int_convert(dealer_id, None)
+            logger.debug(f"🔍 [PROCESS_ACTION] Converted dealer_id: {dealer_id} (type: {type(dealer_id)})")
 
         # Calculate button_id (small blind in heads-up)
         button_id = None
         if dealer_id is not None:
             button_id = (dealer_id + 1) % 2  # In HUNL, button = (dealer + 1) % 2
+            logger.debug(f"🔍 [PROCESS_ACTION] Raw button_id: {button_id} (type: {type(button_id)})")
+            # Convert to int to avoid NumPy array comparison errors
+            button_id = safe_int_convert(button_id, None)
+            logger.debug(f"🔍 [PROCESS_ACTION] Converted button_id: {button_id} (type: {type(button_id)})")
 
         # Fix for small blind first to act preflop - ensure standard raise options are available
         # This must match the fix in get_game_state to keep indices consistent
         artificially_added_actions = []
+        
+        # Add detailed logging for condition checks to debug NumPy array comparison issues
+        logger.debug(f"🔍 [PROCESS_ACTION] Condition check - stage: {stage} (type: {type(stage)}), current_player: {current_player} (type: {type(current_player)}), button_id: {button_id} (type: {type(button_id)})")
+        logger.debug(f"🔍 [PROCESS_ACTION] legal_actions_list: {legal_actions_list} (types: {[type(x) for x in legal_actions_list[:5]] if legal_actions_list else []})")
+        logger.debug(f"🔍 [PROCESS_ACTION] original_legal_actions: {original_legal_actions} (types: {[type(x) for x in original_legal_actions[:5]] if original_legal_actions else []})")
+        
+        try:
+            stage_check = stage == 0
+            logger.debug(f"🔍 [PROCESS_ACTION] stage == 0: {stage_check} (type: {type(stage_check)})")
+        except Exception as e:
+            logger.error(f"❌ [PROCESS_ACTION] Error comparing stage == 0: {e}, stage={stage}, type={type(stage)}")
+            raise
+        
+        try:
+            player_check = current_player == 0
+            logger.debug(f"🔍 [PROCESS_ACTION] current_player == 0: {player_check} (type: {type(player_check)})")
+        except Exception as e:
+            logger.error(f"❌ [PROCESS_ACTION] Error comparing current_player == 0: {e}, current_player={current_player}, type={type(current_player)}")
+            raise
+        
+        try:
+            button_check = button_id == 0 if button_id is not None else False
+            logger.debug(f"🔍 [PROCESS_ACTION] button_id == 0: {button_check} (type: {type(button_check)})")
+        except Exception as e:
+            logger.error(f"❌ [PROCESS_ACTION] Error comparing button_id == 0: {e}, button_id={button_id}, type={type(button_id)}")
+            raise
+        
         if (stage == 0 and  # Preflop
             current_player == 0 and  # Human player (small blind in heads-up)
-            not env.is_over() and
+            not safe_bool_convert(env.is_over()) and
             button_id == 0):  # Small blind is first to act
 
             # Small blind should always be able to make standard preflop raises
             # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
-            logger.info(f"🔧 [PROCESS_ACTION] Small blind preflop check - Action 2 in list: {2 in legal_actions_list}, Action 3 in RLCard: {3 in original_legal_actions}")
+            try:
+                action2_in_list = 2 in legal_actions_list
+                logger.debug(f"🔍 [PROCESS_ACTION] 2 in legal_actions_list: {action2_in_list} (type: {type(action2_in_list)})")
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error checking '2 in legal_actions_list': {e}, legal_actions_list={legal_actions_list}, types={[type(x) for x in legal_actions_list] if legal_actions_list else []}")
+                raise
+            
+            try:
+                action3_in_original = 3 in original_legal_actions
+                logger.debug(f"🔍 [PROCESS_ACTION] 3 in original_legal_actions: {action3_in_original} (type: {type(action3_in_original)})")
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error checking '3 in original_legal_actions': {e}, original_legal_actions={original_legal_actions}, types={[type(x) for x in original_legal_actions] if original_legal_actions else []}")
+                raise
+            
+            logger.info(f"🔧 [PROCESS_ACTION] Small blind preflop check - Action 2 in list: {action2_in_list}, Action 3 in RLCard: {action3_in_original}")
             if 2 not in legal_actions_list and 3 in original_legal_actions:  # RAISE_HALF_POT (Raise to 3 BB) only if RAISE_POT is available in RLCard
                 legal_actions_list.append(2)
                 artificially_added_actions.append(2)
@@ -1698,10 +1905,26 @@ class GameManager:
             return self.get_game_state(session_id)
         
         # Handle artificially added actions that RLCard doesn't actually support
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 9: Processing action mapping...")
         actual_action_value = action_value
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 9a: action_value={action_value}, artificially_added_actions={artificially_added_actions}")
+        
+        try:
+            action_in_artificial = action_value in artificially_added_actions
+            logger.debug(f"🔍 [PROCESS_ACTION] action_value in artificially_added_actions: {action_in_artificial} (type: {type(action_in_artificial)})")
+        except Exception as e:
+            logger.error(f"❌ [PROCESS_ACTION] Error checking 'action_value in artificially_added_actions': {e}, action_value={action_value}, artificially_added_actions={artificially_added_actions}")
+            raise
 
         if action_value in artificially_added_actions:
             # Map artificially added actions to legal alternatives
+            try:
+                action3_in_original = 3 in original_legal_actions
+                logger.debug(f"🔍 [PROCESS_ACTION] 3 in original_legal_actions (artificial check): {action3_in_original} (type: {type(action3_in_original)})")
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error checking '3 in original_legal_actions' (artificial): {e}, original_legal_actions={original_legal_actions}")
+                raise
+            
             if action_value == 2 and 3 in original_legal_actions:  # RAISE_HALF_POT -> RAISE_POT
                 actual_action_value = 3
             else:
@@ -1710,6 +1933,14 @@ class GameManager:
         elif action_value == 2:
             # Special case: Action 2 (RAISE_HALF_POT) may be sent even if not artificially added
             # If action 3 (RAISE_POT) is legal in RLCard, map action 2 to action 3
+            try:
+                action3_in_original = 3 in original_legal_actions
+                action2_in_original = 2 in original_legal_actions
+                logger.debug(f"🔍 [PROCESS_ACTION] 3 in original_legal_actions (action 2 check): {action3_in_original}, 2 in original_legal_actions: {action2_in_original}")
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error checking actions in original_legal_actions (action 2): {e}, original_legal_actions={original_legal_actions}")
+                raise
+            
             if 3 in original_legal_actions:
                 actual_action_value = 3
             elif 2 in original_legal_actions:
@@ -1720,34 +1951,62 @@ class GameManager:
                 raise ValueError(f'Action {action_value} is not legal in RLCard and cannot be mapped')
 
         # Find the action index, handling both integers and Action enums
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 10: Finding action index in original_legal_actions...")
         action_index = None
         action = None
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 10a: actual_action_value={actual_action_value} (type: {type(actual_action_value)}), original_legal_actions={original_legal_actions} (count: {len(original_legal_actions)})")
+        
         for i, orig_action in enumerate(original_legal_actions):
-            if hasattr(orig_action, 'value'):
-                if actual_action_value == orig_action.value:
-                    action_index = i
-                    action = orig_action
-                    break
-            else:
-                if actual_action_value == orig_action:
-                    action_index = i
-                    action = orig_action
-                    break
+            try:
+                if hasattr(orig_action, 'value'):
+                    orig_action_val = orig_action.value
+                    logger.debug(f"🔍 [PROCESS_ACTION] Comparing action {i}: orig_action.value={orig_action_val} (type: {type(orig_action_val)}) with actual_action_value={actual_action_value} (type: {type(actual_action_value)})")
+                    try:
+                        comparison_result = actual_action_value == orig_action_val
+                        logger.debug(f"🔍 [PROCESS_ACTION] Comparison result: {comparison_result} (type: {type(comparison_result)})")
+                        if comparison_result:
+                            action_index = i
+                            action = orig_action
+                            break
+                    except Exception as e:
+                        logger.error(f"❌ [PROCESS_ACTION] Error comparing actual_action_value == orig_action.value: {e}, actual_action_value={actual_action_value}, orig_action_val={orig_action_val}")
+                        raise
+                else:
+                    logger.debug(f"🔍 [PROCESS_ACTION] Comparing action {i}: orig_action={orig_action} (type: {type(orig_action)}) with actual_action_value={actual_action_value} (type: {type(actual_action_value)})")
+                    try:
+                        comparison_result = actual_action_value == orig_action
+                        logger.debug(f"🔍 [PROCESS_ACTION] Comparison result: {comparison_result} (type: {type(comparison_result)})")
+                        if comparison_result:
+                            action_index = i
+                            action = orig_action
+                            break
+                    except Exception as e:
+                        logger.error(f"❌ [PROCESS_ACTION] Error comparing actual_action_value == orig_action: {e}, actual_action_value={actual_action_value}, orig_action={orig_action}")
+                        raise
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error in action finding loop at index {i}: {e}")
+                raise
 
         if action_index is None:
             # Special debug: check what we have
+            logger.error(f"❌ [FOLD_WORKFLOW] Step 10: Could not find action index!")
             action_values_in_list = []
             for orig_action in original_legal_actions:
                 if hasattr(orig_action, 'value'):
                     action_values_in_list.append(orig_action.value)
                 else:
                     action_values_in_list.append(orig_action)
-            logger.error(f"❌ [PROCESS_ACTION] Could not find action {actual_action_value} in RLCard legal actions. Available values: {action_values_in_list}, Full RLCard actions: {original_legal_actions}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Step 10: Available values: {action_values_in_list}, Full RLCard actions: {original_legal_actions}")
             raise ValueError(f'Could not find action {actual_action_value} in RLCard legal actions. Available: {action_values_in_list}, RLCard legal actions: {original_legal_actions}')
+
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 10b: ✓ Found action_index={action_index}, action={action}")
 
         # Edge case: Action is None or invalid
         if action is None:
+            logger.error(f"❌ [FOLD_WORKFLOW] Step 11: Action is None!")
             raise ValueError('Action is None')
+        
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 11: ✓ Action is valid: {action}")
 
         # Get action details for logging
         raw_obs = state.get('raw_obs', {})
@@ -1755,7 +2014,7 @@ class GameManager:
         if hasattr(stage, 'value'):
             stage = stage.value
         elif not isinstance(stage, int):
-            stage = int(stage) if stage else 0
+            stage = safe_int_convert(stage, 0)
 
         pot = raw_obs.get('pot', 0)
         public_cards = raw_obs.get('public_cards', [])
@@ -1810,20 +2069,24 @@ class GameManager:
         # SIMPLIFIED: Hand capture no longer needed - _track_decision gets it from RLCard state directly
 
         # Set action in human agent
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 12: Setting action in human agent...")
         human_agent.set_action(action)
+        logger.info(f"🔍 [FOLD_WORKFLOW] Step 12: ✓ Action set in human agent")
 
         try:
             # Use raw_action=False mode which does validation and conversion through _decode_action
             step_action = action  # Pass the action value (int) for _decode_action to convert to Action enum
             raw_action = False  # Let RLCard decode and validate the action
 
-            logger.debug(f"🎯 [PROCESS_ACTION] Calling env.step({step_action}, {raw_action})")
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 13: Calling env.step() with step_action={step_action} (type: {type(step_action)}), raw_action={raw_action}")
 
             try:
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 13a: About to call env.step()...")
                 next_state, next_player_id = env.step(step_action, raw_action)
-                logger.debug(f"✅ [PROCESS_ACTION] env.step() successful, next_player: {next_player_id}")
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 13b: ✓ env.step() returned successfully")
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 13c: next_state type: {type(next_state)}, next_player_id={next_player_id} (type: {type(next_player_id)})")
             except Exception as step_error:
-                logger.error(f"❌ [PROCESS_ACTION] env.step() failed: {step_error}")
+                logger.error(f"❌ [FOLD_WORKFLOW] Step 13: env.step() failed: {step_error}")
                 logger.error(traceback.format_exc())
                 raise step_error
 
@@ -1843,8 +2106,14 @@ class GameManager:
             # The fork implements BB-first postflop action order directly in the game engine
 
             # Update game state - use RLCard's natural next_player_id
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14: Updating game state...")
             game['current_state'] = next_state
-            game['current_player'] = next_player_id
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14a: Updated current_state")
+            
+            next_player_id_safe = safe_int_convert(next_player_id, None)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14b: next_player_id (raw)={next_player_id} (type: {type(next_player_id)}), converted={next_player_id_safe}")
+            game['current_player'] = next_player_id_safe
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14c: Updated current_player={next_player_id_safe}")
             
             # Get updated state info for logging
             next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
@@ -1852,11 +2121,13 @@ class GameManager:
             next_public_cards = next_raw_obs.get('public_cards', [])
             next_raised = next_raw_obs.get('raised', [0, 0])
             
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 15: State after action - next_pot={next_pot}, next_public_cards count={len(next_public_cards)}, next_raised={next_raised}")
+            
             # Log action result
-            logger.info(f"✅ Action processed - Session: {session_id}, Next: P{next_player_id}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
+            logger.info(f"✅ [FOLD_WORKFLOW] Action processed - Session: {session_id}, Next: P{next_player_id_safe}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
 
             # Track decision for hand history
-            logger.debug(f"📊 [PROCESS_ACTION] Tracking decision - Player: {current_player}, Action: {action}")
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 16: Tracking decision - Player: {current_player}, Action: {action}")
 
             # Update state's current_player to reflect the player who just acted
             state['raw_obs']['current_player'] = current_player
@@ -1868,42 +2139,102 @@ class GameManager:
                 previous_raised = raw_obs.get('raised', [0, 0])
                 next_raised = next_raw_obs.get('raised', [0, 0])
                 
+                logger.debug(f"🔍 [BET_AMOUNT] previous_raised: {previous_raised} (types: {[type(x) for x in previous_raised] if isinstance(previous_raised, list) else type(previous_raised)})")
+                logger.debug(f"🔍 [BET_AMOUNT] next_raised: {next_raised} (types: {[type(x) for x in next_raised] if isinstance(next_raised, list) else type(next_raised)})")
+                logger.debug(f"🔍 [BET_AMOUNT] action_value: {action_value} (type: {type(action_value)})")
+                logger.debug(f"🔍 [BET_AMOUNT] current_player: {current_player} (type: {type(current_player)})")
+                
                 if action_value in [2, 3, 4]:  # Raise actions
                     # For raises, bet_amount is the total amount raised TO
                     if current_player == 0:
                         bet_amount = next_raised[0] if len(next_raised) > 0 else 0
+                        logger.debug(f"🔍 [BET_AMOUNT] Raise - Player 0, bet_amount: {bet_amount} (type: {type(bet_amount)})")
                     else:
                         bet_amount = next_raised[1] if len(next_raised) > 1 else 0
+                        logger.debug(f"🔍 [BET_AMOUNT] Raise - Player 1, bet_amount: {bet_amount} (type: {type(bet_amount)})")
                 elif action_value == 1:  # Check/Call
                     # For Check/Call, calculate the amount needed to call using PREVIOUS state
                     # After a call, raised array equalizes, so we need to use before-state
                     if current_player == 0:
                         opponent_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
                         player_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
+                        logger.debug(f"🔍 [BET_AMOUNT] Player 0 - opponent_raised_before: {opponent_raised_before} (type: {type(opponent_raised_before)}), player_raised_before: {player_raised_before} (type: {type(player_raised_before)})")
+                        
+                        # Convert to Python native types to avoid NumPy array comparison issues
+                        opponent_raised_before = safe_int_convert(opponent_raised_before, 0)
+                        player_raised_before = safe_int_convert(player_raised_before, 0)
+                        
                         call_amount = opponent_raised_before - player_raised_before
+                        logger.debug(f"🔍 [BET_AMOUNT] Player 0 - call_amount: {call_amount} (type: {type(call_amount)})")
+                        
+                        try:
+                            call_amount_gt_zero = call_amount > 0
+                            logger.debug(f"🔍 [BET_AMOUNT] Player 0 - call_amount > 0: {call_amount_gt_zero} (type: {type(call_amount_gt_zero)})")
+                        except Exception as e:
+                            logger.error(f"❌ [BET_AMOUNT] Error comparing call_amount > 0: {e}, call_amount={call_amount}, type={type(call_amount)}")
+                            raise
+                        
                         bet_amount = call_amount if call_amount > 0 else 0
+                        bet_amount = safe_int_convert(bet_amount, 0)
                         logger.debug(f"📊 [CALL_CALC] Player 0: opponent_raised={opponent_raised_before}, player_raised={player_raised_before}, call_amount={call_amount}, bet_amount={bet_amount}")
                     else:
                         opponent_raised_before = previous_raised[0] if len(previous_raised) > 0 else 0
                         player_raised_before = previous_raised[1] if len(previous_raised) > 1 else 0
+                        logger.debug(f"🔍 [BET_AMOUNT] Player 1 - opponent_raised_before: {opponent_raised_before} (type: {type(opponent_raised_before)}), player_raised_before: {player_raised_before} (type: {type(player_raised_before)})")
+                        
+                        # Convert to Python native types to avoid NumPy array comparison issues
+                        opponent_raised_before = safe_int_convert(opponent_raised_before, 0)
+                        player_raised_before = safe_int_convert(player_raised_before, 0)
+                        
                         call_amount = opponent_raised_before - player_raised_before
+                        logger.debug(f"🔍 [BET_AMOUNT] Player 1 - call_amount: {call_amount} (type: {type(call_amount)})")
+                        
+                        try:
+                            call_amount_gt_zero = call_amount > 0
+                            logger.debug(f"🔍 [BET_AMOUNT] Player 1 - call_amount > 0: {call_amount_gt_zero} (type: {type(call_amount_gt_zero)})")
+                        except Exception as e:
+                            logger.error(f"❌ [BET_AMOUNT] Error comparing call_amount > 0: {e}, call_amount={call_amount}, type={type(call_amount)}")
+                            raise
+                        
                         bet_amount = call_amount if call_amount > 0 else 0
+                        bet_amount = safe_int_convert(bet_amount, 0)
                         logger.debug(f"📊 [CALL_CALC] Player 1: opponent_raised={opponent_raised_before}, player_raised={player_raised_before}, call_amount={call_amount}, bet_amount={bet_amount}")
             except Exception as e:
-                logger.warning(f"Error calculating bet_amount for player event: {e}")
+                logger.error(f"❌ [BET_AMOUNT] Error calculating bet_amount for player event: {e}")
+                logger.error(traceback.format_exc())
                 bet_amount = None
 
             # Emit action event
-            self._emit_action_event(session_id, current_player, action_value, state, next_state, bet_amount)
+            logger.debug(f"🔍 [PROCESS_ACTION] About to call _emit_action_event - current_player: {current_player} (type: {type(current_player)}), action_value: {action_value} (type: {type(action_value)}), bet_amount: {bet_amount} (type: {type(bet_amount)})")
+            try:
+                self._emit_action_event(session_id, current_player, action_value, state, next_state, bet_amount)
+                logger.debug(f"✅ [PROCESS_ACTION] _emit_action_event completed successfully")
+            except Exception as e:
+                logger.error(f"❌ [PROCESS_ACTION] Error in _emit_action_event: {e}")
+                logger.error(traceback.format_exc())
+                raise
             
             # Also track decision for legacy compatibility
-            self._track_decision(session_id, current_player, action, state, next_state)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 17: Calling _track_decision - current_player: {current_player} (type: {type(current_player)}), action: {action} (type: {type(action)})")
+            try:
+                self._track_decision(session_id, current_player, action, state, next_state)
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 17: ✓ _track_decision completed successfully")
+            except Exception as e:
+                logger.error(f"❌ [FOLD_WORKFLOW] Step 17: Error in _track_decision: {e}")
+                logger.error(traceback.format_exc())
+                raise
 
-            return self.get_game_state(session_id)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 18: Getting final game state and returning...")
+            final_state = self.get_game_state(session_id)
+            logger.info(f"🔍 [FOLD_WORKFLOW] Step 18: ✓ Got final game state, returning")
+            return final_state
         except Exception as e:
-            logger.error(f"❌ [PROCESS_ACTION] Error processing action for session {session_id}: {str(e)}")
-            logger.error(f"❌ [PROCESS_ACTION] Action details - Requested: {action_value}, Mapped: {actual_action_value}, Index: {action_index}, Action: {action}")
-            logger.error(f"❌ [PROCESS_ACTION] Legal actions context - RLCard: {original_legal_actions}, Modified: {legal_actions_list}, Artificial: {artificially_added_actions}")
+            logger.error(f"❌ [FOLD_WORKFLOW] ERROR in process_action for session {session_id}: {str(e)}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Error type: {type(e).__name__}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Action details - Requested: {action_value}, Mapped: {actual_action_value if 'actual_action_value' in locals() else 'N/A'}, Index: {action_index if 'action_index' in locals() else 'N/A'}, Action: {action if 'action' in locals() else 'N/A'}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Legal actions context - RLCard: {original_legal_actions if 'original_legal_actions' in locals() else 'N/A'}, Modified: {legal_actions_list if 'legal_actions_list' in locals() else 'N/A'}, Artificial: {artificially_added_actions if 'artificially_added_actions' in locals() else 'N/A'}")
+            logger.error(f"❌ [FOLD_WORKFLOW] Full traceback:")
+            logger.error(traceback.format_exc())
             raise
     
     def process_ai_turn(self, session_id):
@@ -1918,6 +2249,8 @@ class GameManager:
         env = game['env']
         state = game['current_state']
         current_player = game['current_player']
+        # Convert to int to avoid NumPy array comparison errors
+        current_player = safe_int_convert(current_player, 0)
         ai_agent = game['ai_agent']
 
         logger.debug(f"🤖 [AI_TURN] Game state: current_player={current_player}, env_type={type(env)}, ai_agent_type={type(ai_agent)}")
@@ -1929,7 +2262,7 @@ class GameManager:
 
         # Edge case: Game already over
         try:
-            game_over = env.is_over()
+            game_over = safe_bool_convert(env.is_over())
             logger.debug(f"🤖 [AI_TURN] Game over check: {game_over}")
             if game_over:
                 logger.info(f"🏁 [AI_TURN] Game already over for session {session_id}")
@@ -2044,7 +2377,7 @@ class GameManager:
             if hasattr(stage, 'value'):
                 stage = stage.value
             elif not isinstance(stage, int):
-                stage = int(stage) if stage else 0
+                stage = safe_int_convert(stage, 0)
             
             stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
             stage_name = stage_names.get(stage, f'Stage {stage}')
@@ -2143,31 +2476,45 @@ class GameManager:
     
     def _track_decision(self, session_id, player_id, action, state, next_state):
         """Track a decision for hand history - SIMPLIFIED for native RLCard integration"""
+        logger.info(f"🔍 [TRACK_DECISION] Starting - session_id={session_id}, player_id={player_id}, action={action}")
         try:
+            logger.info(f"🔍 [TRACK_DECISION] Step 1: Checking hand_history_storage...")
             if session_id not in hand_history_storage:
                 hand_history_storage[session_id] = []
+                logger.info(f"🔍 [TRACK_DECISION] Step 1: Created new hand_history_storage entry")
 
             # SIMPLIFIED: Use native RLCard state directly (no complex reconstruction needed)
             # Use next_state for pot and public cards (after the action), but state for other context
+            logger.info(f"🔍 [TRACK_DECISION] Step 2: Extracting raw_obs from state and next_state...")
             raw_obs = state.get('raw_obs', {})
             next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
+            logger.info(f"🔍 [TRACK_DECISION] Step 2: raw_obs keys: {list(raw_obs.keys()) if raw_obs else 'empty'}, next_raw_obs keys: {list(next_raw_obs.keys()) if next_raw_obs else 'empty'}")
 
             # Get stage directly from RLCard state (now consistent)
+            logger.info(f"🔍 [TRACK_DECISION] Step 3: Getting stage...")
             stage = raw_obs.get('stage', 0)
+            logger.info(f"🔍 [TRACK_DECISION] Step 3a: stage (raw)={stage} (type: {type(stage)})")
             if hasattr(stage, 'value'):
                 stage = stage.value
+                logger.info(f"🔍 [TRACK_DECISION] Step 3b: stage.value={stage}")
             elif not isinstance(stage, int):
-                stage = int(stage) if stage else 0
+                stage = safe_int_convert(stage, 0)
+                logger.info(f"🔍 [TRACK_DECISION] Step 3c: converted stage={stage}")
+            logger.info(f"🔍 [TRACK_DECISION] Step 3: Final stage={stage} (type: {type(stage)})")
 
             # SIMPLIFIED: Get hand directly from RLCard's consistent state
             # With native BB-first action order, state should be consistent
+            logger.info(f"🔍 [TRACK_DECISION] Step 4: Extracting hand cards...")
             hand_cards = []
             if session_id in self.games:
                 game = self.games[session_id]
                 env = game.get('env')
+                logger.info(f"🔍 [TRACK_DECISION] Step 4a: session_id in games: {session_id in self.games}, env exists: {env is not None}")
                 if env and hasattr(env, 'game') and hasattr(env.game, 'players') and player_id < len(env.game.players):
+                    logger.info(f"🔍 [TRACK_DECISION] Step 4b: player_id={player_id}, len(players)={len(env.game.players) if hasattr(env.game, 'players') else 'N/A'}")
                     player_obj = env.game.players[player_id]
                     if hasattr(player_obj, 'hand') and player_obj.hand:
+                        logger.info(f"🔍 [TRACK_DECISION] Step 4c: player_obj.hand exists: {player_obj.hand}")
                         # Convert Card objects to strings for JSON serialization
                         try:
                             from rlcard.games.base import Card
@@ -2175,29 +2522,58 @@ class GameManager:
                                 hand_cards = [str(card) for card in player_obj.hand]
                             else:
                                 hand_cards = [str(c) for c in player_obj.hand]
-                        except:
+                            logger.info(f"🔍 [TRACK_DECISION] Step 4d: Converted hand_cards: {hand_cards}")
+                        except Exception as e:
+                            logger.error(f"❌ [TRACK_DECISION] Step 4d: Error converting hand: {e}")
                             hand_cards = [str(c) for c in player_obj.hand]
+                else:
+                    logger.warning(f"🔍 [TRACK_DECISION] Step 4: Could not access player hand - env={env is not None}, has game={hasattr(env, 'game') if env else False}, player_id valid={player_id < len(env.game.players) if (env and hasattr(env, 'game') and hasattr(env.game, 'players')) else False}")
+            logger.info(f"🔍 [TRACK_DECISION] Step 4: Final hand_cards: {hand_cards}")
 
             # Convert action to serializable format
+            logger.info(f"🔍 [TRACK_DECISION] Step 5: Converting action to serializable format...")
+            logger.info(f"🔍 [TRACK_DECISION] Step 5a: action={action} (type: {type(action)})")
             if hasattr(action, 'value'):
                 action_value = action.value
+                logger.info(f"🔍 [TRACK_DECISION] Step 5b: action.value={action_value}")
             else:
-                action_value = int(action) if action is not None else 0
+                action_value = safe_int_convert(action, 0)
+                logger.info(f"🔍 [TRACK_DECISION] Step 5c: converted action_value={action_value}")
+            logger.info(f"🔍 [TRACK_DECISION] Step 5: Final action_value={action_value} (type: {type(action_value)})")
 
             # Get pot from next_state (after the action was taken)
+            logger.info(f"🔍 [TRACK_DECISION] Step 5d: Getting pot...")
             pot = next_raw_obs.get('pot', raw_obs.get('pot', 0))
-            pot = int(pot) if pot else 0
+            logger.info(f"🔍 [TRACK_DECISION] Step 5e: pot (raw)={pot} (type: {type(pot)})")
+            pot = safe_int_convert(pot, 0)
+            logger.info(f"🔍 [TRACK_DECISION] Step 5f: pot (converted)={pot}")
 
             # Get public cards from next_state (after the action)
+            logger.info(f"🔍 [TRACK_DECISION] Step 5g: Getting public cards...")
             public_cards = next_raw_obs.get('public_cards', raw_obs.get('public_cards', []))
+            logger.info(f"🔍 [TRACK_DECISION] Step 5h: public_cards={public_cards} (count: {len(public_cards) if public_cards else 0})")
 
             # Calculate bet amount for this action
+            logger.info(f"🔍 [TRACK_DECISION] Step 6: Calculating bet_amount...")
             bet_amount = 0
             try:
                 # For action labeling, bet_amount represents the total amount raised TO
                 previous_pot = raw_obs.get('pot', 0)
                 current_pot = next_raw_obs.get('pot', 0)
+                logger.info(f"🔍 [TRACK_DECISION] Step 6a: previous_pot (raw)={previous_pot} (type: {type(previous_pot)}), current_pot (raw)={current_pot} (type: {type(current_pot)})")
+                # Convert to int to avoid array comparison errors
+                previous_pot = safe_int_convert(previous_pot, 0)
+                current_pot = safe_int_convert(current_pot, 0)
+                logger.info(f"🔍 [TRACK_DECISION] Step 6b: previous_pot (converted)={previous_pot}, current_pot (converted)={current_pot}")
                 pot_increase = current_pot - previous_pot
+                logger.info(f"🔍 [TRACK_DECISION] Step 6c: pot_increase={pot_increase}, action_value={action_value}")
+
+                try:
+                    pot_increase_check = pot_increase > 0
+                    logger.info(f"🔍 [TRACK_DECISION] Step 6d: pot_increase > 0: {pot_increase_check} (type: {type(pot_increase_check)})")
+                except Exception as e:
+                    logger.error(f"❌ [TRACK_DECISION] Step 6d: Error comparing pot_increase > 0: {e}, pot_increase={pot_increase}, type={type(pot_increase)}")
+                    raise
 
                 if pot_increase > 0 and action_value in [2, 3, 4]:  # Raise actions
                     # For raise actions, bet_amount is the amount the player raised TO
@@ -2211,10 +2587,14 @@ class GameManager:
                     bet_amount = 0
 
             except Exception as e:
+                logger.error(f"❌ [TRACK_DECISION] Step 6: Error calculating bet_amount: {e}")
+                logger.error(traceback.format_exc())
                 bet_amount = 0
+            logger.info(f"🔍 [TRACK_DECISION] Step 6: Final bet_amount={bet_amount}")
 
             # CRITICAL FIX: Store context information for correct action labeling
             # This fixes the bug where Call actions show as "Check" in action history
+            logger.info(f"🔍 [TRACK_DECISION] Step 7: Extracting context for action labeling...")
             context = None
             try:
                 if session_id in self.games:
@@ -2226,15 +2606,24 @@ class GameManager:
                         'in_chips': state.get('in_chips', [0, 0]) if isinstance(state, dict) else [0, 0],
                         'raised': raw_obs.get('raised', [0, 0])
                     }
+                    logger.info(f"🔍 [TRACK_DECISION] Step 7a: Calling ActionLabeling.get_context_from_state...")
                     context = ActionLabeling.get_context_from_state(state_with_processed, player_id=player_id, env=env)
+                    logger.info(f"🔍 [TRACK_DECISION] Step 7b: Got context: {context}")
                     # Convert numpy types to Python native types to prevent boolean evaluation errors
                     if context:
+                        logger.info(f"🔍 [TRACK_DECISION] Step 7c: Converting numpy types in context...")
                         context = self._convert_numpy_types_in_dict(context)
+                        logger.info(f"🔍 [TRACK_DECISION] Step 7d: Converted context: {context}")
             except Exception as e:
-                logger.debug(f"Could not extract context for action labeling: {e}")
+                logger.error(f"❌ [TRACK_DECISION] Step 7: Could not extract context for action labeling: {e}")
+                logger.error(traceback.format_exc())
                 context = None
 
             # Create decision record
+            logger.info(f"🔍 [TRACK_DECISION] Step 8: Creating decision record...")
+            logger.info(f"🔍 [TRACK_DECISION] Step 8a: player_id={player_id}, action_value={action_value}, stage={stage}, pot={pot}")
+            logger.info(f"🔍 [TRACK_DECISION] Step 8b: hand_cards={hand_cards}, public_cards={public_cards}, bet_amount={bet_amount}")
+            
             decision_record = {
                 'player_id': player_id,
                 'action': action_value,
@@ -2246,9 +2635,12 @@ class GameManager:
                 'context': context,  # Store context for correct action labeling
                 'timestamp': time.time()
             }
+            logger.info(f"🔍 [TRACK_DECISION] Step 8c: Decision record created: {decision_record}")
 
             # Add to hand history
+            logger.info(f"🔍 [TRACK_DECISION] Step 9: Adding decision record to hand_history_storage...")
             hand_history_storage[session_id].append(decision_record)
+            logger.info(f"🔍 [TRACK_DECISION] Step 9: ✓ Decision record added. Total decisions: {len(hand_history_storage[session_id])}")
 
             # Log the decision (simplified)
             stage_names = {0: 'Preflop', 1: 'Flop', 2: 'Turn', 3: 'River'}
@@ -2257,13 +2649,14 @@ class GameManager:
             hand_str = ', '.join(hand_cards) if hand_cards else 'None'
             public_cards_str = ', '.join([str(c) for c in public_cards]) if public_cards else 'None'
 
-            logger.info(f"📊 Decision tracked - Session: {session_id}, Player {player_id}, {stage_name}, Action: {action_value}, Pot: {pot}, Hand: [{hand_str}], Board: [{public_cards_str}]")
+            logger.info(f"📊 [TRACK_DECISION] Decision tracked - Session: {session_id}, Player {player_id}, {stage_name}, Action: {action_value}, Pot: {pot}, Hand: [{hand_str}], Board: [{public_cards_str}]")
+            logger.info(f"🔍 [TRACK_DECISION] Step 10: ✓ _track_decision completed successfully")
 
         except Exception as e:
-            logger.warning(f"Error tracking decision for session {session_id}: {str(e)}")
-            # Don't fail the game if tracking fails
-        except Exception as e:
-            logger.warning(f"Error tracking decision for session {session_id}: {str(e)}")
+            logger.error(f"❌ [TRACK_DECISION] ERROR in _track_decision for session {session_id}: {str(e)}")
+            logger.error(f"❌ [TRACK_DECISION] Error type: {type(e).__name__}")
+            logger.error(f"❌ [TRACK_DECISION] Full traceback:")
+            logger.error(traceback.format_exc())
             # Don't fail the game if tracking fails
 
     def _convert_numpy_types_in_dict(self, data):

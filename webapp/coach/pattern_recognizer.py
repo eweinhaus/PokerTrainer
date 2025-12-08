@@ -260,3 +260,4 @@ class PatternRecognizer:
             del self.pattern_cache[session_id][oldest_key]
 
 
+
