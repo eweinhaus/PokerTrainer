@@ -10,7 +10,7 @@ Replaces GTOAgent functionality with LLM-powered decision making.
 
 import os
 import time
-# logging removed
+import logging
 import traceback
 import json
 import numpy as np
@@ -23,6 +23,9 @@ except Exception as e:
     OPENAI_AVAILABLE = False
     OpenAI = None
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Import shared action labeling module
 from .action_labeling import ActionLabeling
@@ -131,6 +134,7 @@ class LLMOpponentAgent:
             if not openrouter_key or openrouter_key == "your_openrouter_key_here" or openrouter_key == "your_key_here":
                 self.client = None
                 self.api_key_available = False
+                logger.warning(f"🤖 [LLM_OPPONENT] OpenRouter key not available or invalid")
             else:
                 try:
                     # OpenRouter uses OpenAI-compatible API with different base URL
@@ -143,17 +147,21 @@ class LLMOpponentAgent:
                     self.use_openrouter = True
                     # Use a good default model for OpenRouter (GPT-4 Turbo)
                     self.model = "openai/gpt-4-turbo"
+                    logger.info(f"🤖 [LLM_OPPONENT] OpenRouter client initialized successfully")
                 except Exception as e:
                     self.client = None
                     self.api_key_available = False
+                    logger.warning(f"🤖 [LLM_OPPONENT] Failed to initialize OpenRouter client: {e}")
 
         elif llm_provider == "openai":
             if not OPENAI_AVAILABLE:
                 self.client = None
                 self.api_key_available = False
+                logger.warning(f"🤖 [LLM_OPPONENT] OpenAI library not available")
             elif not openai_key or openai_key == "your_openai_api_key_here" or openai_key == "your_key_here":
                 self.client = None
                 self.api_key_available = False
+                logger.warning(f"🤖 [LLM_OPPONENT] OpenAI key not available or invalid")
             else:
                 try:
                     self.client = OpenAI(
@@ -162,9 +170,11 @@ class LLMOpponentAgent:
                     )
                     self.api_key_available = True
                     self.model = "gpt-4-turbo-preview"
+                    logger.info(f"🤖 [LLM_OPPONENT] OpenAI client initialized successfully")
                 except Exception as e:
                     self.client = None
                     self.api_key_available = False
+                    logger.warning(f"🤖 [LLM_OPPONENT] Failed to initialize OpenAI client: {e}")
 
         else:
             # Try OpenAI as fallback
@@ -177,12 +187,15 @@ class LLMOpponentAgent:
                     self.api_key_available = True
                     self.model = "gpt-4-turbo-preview"
                     self.llm_provider = "openai"
+                    logger.info(f"🤖 [LLM_OPPONENT] OpenAI client initialized successfully (fallback)")
                 except Exception as e:
                     self.client = None
                     self.api_key_available = False
+                    logger.warning(f"🤖 [LLM_OPPONENT] Failed to initialize OpenAI client (fallback): {e}")
             else:
                 self.client = None
                 self.api_key_available = False
+                logger.warning(f"🤖 [LLM_OPPONENT] No valid API keys found, LLM opponent will use GTOAgent fallback")
     
     def _card_to_rank_suit(self, card_index):
         """
@@ -376,6 +389,8 @@ class LLMOpponentAgent:
 
         # Check if LLM is available
         if not self.api_key_available or not self.client:
+            logger.warning(f"🤖 [LLM_OPPONENT] LLM not available - api_key_available={self.api_key_available}, client={self.client is not None}, falling back to GTOAgent")
+            logger.warning(f"🤖 [LLM_OPPONENT] LLM_PROVIDER={os.getenv('LLM_PROVIDER', 'not set')}, OPEN_ROUTER_KEY={'set' if os.getenv('OPEN_ROUTER_KEY') else 'not set'}, OPENAI_API_KEY={'set' if os.getenv('OPENAI_API_KEY') else 'not set'}")
             return self.gto_agent.step(state)
 
         # SPECIAL CASE: SB opening preflop - skip LLM and use GTO strategy directly
@@ -453,6 +468,7 @@ class LLMOpponentAgent:
             # 1. Extract opponent cards
             opponent_cards = self._extract_opponent_cards(state)
             if not opponent_cards:
+                logger.warning(f"🤖 [LLM_OPPONENT] Could not extract opponent cards, falling back to GTOAgent. State keys: {list(state.keys())}, raw_obs keys: {list(state.get('raw_obs', {}).keys())}")
                 return self.gto_agent.step(state)
             
             # 2. Build context
@@ -466,6 +482,7 @@ class LLMOpponentAgent:
             llm_action = self._call_llm_for_decision(context)
             
             if not llm_action:
+                logger.warning(f"🤖 [LLM_OPPONENT] LLM call returned None, falling back to GTOAgent")
                 return self.gto_agent.step(state)
             
             # 5. Map LLM action to RLCard Action enum and validate
@@ -490,6 +507,8 @@ class LLMOpponentAgent:
             
         except Exception as e:
             # Fallback to GTOAgent on any error
+            logger.error(f"🤖 [LLM_OPPONENT] Exception in LLM opponent step: {e}")
+            logger.error(traceback.format_exc())
             return self.gto_agent.step(state)
     
     def eval_step(self, state):

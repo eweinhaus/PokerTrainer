@@ -5,8 +5,12 @@ This agent uses GTO ranges and principles to make decisions instead of random ac
 """
 
 import random
+import logging
 import numpy as np
 from .gto_rules import GTORules
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Import RLCard Action enum
 try:
@@ -394,6 +398,7 @@ class GTOAgent:
         hand = raw_obs.get('hand', [])
         if not hand or len(hand) != 2:
             # No hand or invalid hand - fold
+            logger.warning(f"🤖 [GTO_AGENT] No hand or invalid hand: {hand}, raw_obs keys: {list(raw_obs.keys())}")
             if Action.FOLD in raw_legal_actions:
                 return Action.FOLD
             return raw_legal_actions[0]  # Default to first action
@@ -402,6 +407,7 @@ class GTOAgent:
         hand_str = self._hand_to_string(hand)
         if not hand_str:
             # Invalid hand - fold
+            logger.warning(f"🤖 [GTO_AGENT] Could not convert hand to string: {hand}")
             if Action.FOLD in raw_legal_actions:
                 return Action.FOLD
             return raw_legal_actions[0]
@@ -445,17 +451,8 @@ class GTOAgent:
             # Get GTO action
             gto_action = self._get_preflop_action(hand_str, position, action_type, stack_depth)
             
-            # DEBUG: Log GTO action with full context
-            
-            # CRITICAL DEBUG: Check if GTO action is always 'raise'
-            if gto_action == 'raise':
-                pass
-            elif gto_action == 'call':
-                pass
-            elif gto_action == 'fold':
-                pass
-            else:
-                pass
+            # Log GTO action with full context for debugging
+            logger.info(f"🤖 [GTO_AGENT] Preflop decision: hand={hand_str}, position={position}, action_type={action_type}, stack_depth={stack_depth:.1f}BB, gto_action={gto_action}")
             
             # SAFEGUARD: Validate GTO action
             if gto_action not in ['raise', 'call', 'fold']:
@@ -504,6 +501,7 @@ class GTOAgent:
         # Postflop decision
         else:
             action = self._get_postflop_action(raw_obs, hand_str)
+            logger.info(f"🤖 [GTO_AGENT] Postflop decision: hand={hand_str}, stage={stage}, action={action}")
             
             # Convert string action to Action enum
             if action == 'raise':

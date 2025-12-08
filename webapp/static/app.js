@@ -779,30 +779,62 @@ class PokerGame {
         // In HUNL, button is on the small blind position
         // Use button_id if available, otherwise calculate from dealer_id
         let buttonId = this.gameState?.button_id;
+        const dealerId = this.gameState?.dealer_id;
         
-        // If button_id is not available, try to calculate from dealer_id
-        if (buttonId === null || buttonId === undefined || buttonId === '') {
-            const dealerId = this.gameState?.dealer_id;
-            if (dealerId !== null && dealerId !== undefined && dealerId !== '') {
+        // Debug logging
+        console.log('🎲 [DEALER_CHIP] updateDealerChip called:', {
+            button_id: buttonId,
+            dealer_id: dealerId,
+            button_id_type: typeof buttonId,
+            dealer_id_type: typeof dealerId,
+            gameState: this.gameState
+        });
+        
+        // Convert buttonId to number first to check if it's valid
+        let buttonIdNum = parseInt(buttonId, 10);
+        
+        // If button_id is not available or invalid, try to calculate from dealer_id
+        // Note: buttonId can be 0 (valid), so we check for null/undefined/empty/NaN specifically
+        if (buttonId === null || buttonId === undefined || buttonId === '' || isNaN(buttonIdNum)) {
+            const dealerIdNum = parseInt(dealerId, 10);
+            if (dealerId !== null && dealerId !== undefined && dealerId !== '' && !isNaN(dealerIdNum)) {
                 // Button = small blind = (dealer_id + 1) % num_players
                 // In HUNL with 2 players: button alternates between 0 and 1
-                buttonId = (dealerId + 1) % 2;
+                buttonId = (dealerIdNum + 1) % 2;
+                buttonIdNum = buttonId;
+                console.log('🎲 [DEALER_CHIP] Calculated buttonId from dealerId:', buttonId);
             } else {
                 // If we can't determine button, don't show any chip
+                console.log('🎲 [DEALER_CHIP] Cannot determine button - no dealer_id or button_id');
                 return;
             }
+        } else {
+            // Use the parsed value
+            buttonId = buttonIdNum;
         }
         
-        // Convert to number if it's a string
-        buttonId = parseInt(buttonId, 10);
+        console.log('🎲 [DEALER_CHIP] Final buttonId:', buttonId, 'type:', typeof buttonId);
         
         // Show chip only for the button player (small blind in HUNL)
-        if (!isNaN(buttonId)) {
-            if (buttonId === 0 && playerDealerChip) {
-                playerDealerChip.style.display = 'block';
-            } else if (buttonId === 1 && opponentDealerChip) {
-                opponentDealerChip.style.display = 'block';
+        // Use strict equality check to ensure correct comparison
+        if (buttonId === 0 || buttonId === 1) {
+            if (buttonId === 0) {
+                if (playerDealerChip) {
+                    console.log('🎲 [DEALER_CHIP] Showing chip on player (buttonId=0)');
+                    playerDealerChip.style.display = 'block';
+                } else {
+                    console.log('🎲 [DEALER_CHIP] playerDealerChip element not found');
+                }
+            } else if (buttonId === 1) {
+                if (opponentDealerChip) {
+                    console.log('🎲 [DEALER_CHIP] Showing chip on opponent (buttonId=1)');
+                    opponentDealerChip.style.display = 'block';
+                } else {
+                    console.log('🎲 [DEALER_CHIP] opponentDealerChip element not found');
+                }
             }
+        } else {
+            console.log('🎲 [DEALER_CHIP] Invalid buttonId:', buttonId, 'playerDealerChip:', !!playerDealerChip, 'opponentDealerChip:', !!opponentDealerChip);
         }
     }
 
@@ -1038,7 +1070,11 @@ class PokerGame {
                 
                 // Handle different event types
                 if (event.kind === 'community') {
-                    // Community cards (Flop/Turn/River)
+                    // Community cards (Flop/Turn only - River is not shown in action history)
+                    // Skip River events
+                    if (event.label === 'River' || event.stage === 'river') {
+                        continue;
+                    }
                     actionEntry.className = 'action-entry community-cards-entry';
                     const cardsText = event.cards.map(card => this.formatCard(card)).join(' ');
                     actionEntry.innerHTML = `
@@ -1093,6 +1129,10 @@ class PokerGame {
                 const actionEntry = document.createElement('div');
                 
                 if (action.type === 'community_cards') {
+                    // Skip River cards - they are not shown in action history
+                    if (action.stage === 'River' || action.stage === 'river') {
+                        continue;
+                    }
                     actionEntry.className = 'action-entry community-cards-entry';
                     const cardsText = (action.all_cards || []).map(card => this.formatCard(card)).join(' ');
                     actionEntry.innerHTML = `

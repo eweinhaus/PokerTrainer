@@ -496,11 +496,12 @@ class GameManager:
                 new_cards = [current_public_cards[3]]
                 pot = raw_obs.get('pot', 0)
                 self._emit_community_card_event(session_id, 'Turn', new_cards, pot)
-            elif stage_name == 'river' and current_public_cards_count >= 5:
-                # River dealt
-                new_cards = [current_public_cards[4]]
-                pot = raw_obs.get('pot', 0)
-                self._emit_community_card_event(session_id, 'River', new_cards, pot)
+            # River card events are not added to action history UI
+            # elif stage_name == 'river' and current_public_cards_count >= 5:
+            #     # River dealt
+            #     new_cards = [current_public_cards[4]]
+            #     pot = raw_obs.get('pot', 0)
+            #     self._emit_community_card_event(session_id, 'River', new_cards, pot)
         
         game['last_public_cards_count'] = current_public_cards_count
         game['last_stage'] = current_stage
@@ -651,19 +652,6 @@ class GameManager:
         # Convert current_player to int to avoid NumPy array comparison errors
         current_player = safe_int_convert(current_player, 0)
 
-        # Fix for small blind first to act preflop - ensure standard raise options are available
-        if (stage == 0 and  # Preflop
-            current_player == 0 and  # Human player
-            not safe_bool_convert(env.is_over()) and
-            button_id == 0):  # Human is SB (button_id represents SB position)
-
-            # Small blind should always be able to make standard preflop raises
-            # RLCard sometimes incorrectly marks RAISE_HALF_POT as illegal
-            if 2 not in legal_actions and 3 in legal_actions:  # RAISE_HALF_POT (Raise to 3 BB) only if RAISE_POT is available
-                legal_actions.append(2)
-            if 2 not in raw_legal_actions and 3 in raw_legal_actions:
-                raw_legal_actions.append(2)
-        
         # Get in_chips from players (amount each player has bet in current hand)
         in_chips = [0, 0]
         # Also try to get remaining chips directly from player objects (more reliable than raw_obs)
@@ -691,6 +679,66 @@ class GameManager:
         # SIMPLIFIED: Use RLCard's natural raised array directly
         # With native BB-first action order, RLCard's state should be consistent
         raised = raw_obs.get('raised', [0, 0])
+        
+        # Fix for small blind first to act preflop - ensure standard raise options are available
+        # Use ActionLabeling context to determine when "Raise to 3BB" should be available
+        if (stage == 0 and  # Preflop
+            current_player == 0 and  # Human player
+            not safe_bool_convert(env.is_over())):
+            
+            # Build context to check if "Raise to 3BB" should be available
+            state_with_processed = {
+                'raw_obs': raw_obs,
+                'in_chips': in_chips,
+                'raised': raised
+            }
+            
+            try:
+                from coach.action_labeling import ActionLabeling
+                context = ActionLabeling.get_context_from_state(state_with_processed, player_id=0, env=env)
+                button_labels = ActionLabeling.get_button_labels(context)
+                
+                logger.debug(f"🔧 [GET_GAME_STATE] Preflop SB check - context: {context}, button_labels: {button_labels}, button_id: {button_id}")
+                
+                # Check if "Raise to 3BB" should be available (check both label formats)
+                raise_label = button_labels.get('raiseHalfPot', '')
+                should_show = button_labels.get('showRaiseHalfPot', False)
+                is_small_blind = context.get('is_small_blind', False)
+                is_first_to_act = context.get('is_first_to_act', False)
+                
+                # If we're SB first to act preflop and should show "Raise to 3BB", add action 2
+                # Check for both "Raise to 3 BB" (with space) and "Raise to 3BB" (without space)
+                should_add_action_2 = (
+                    should_show and 
+                    ('Raise to 3' in raise_label or raise_label == 'Raise to 3BB') and
+                    (is_small_blind and is_first_to_act)
+                )
+                
+                # Also check if button_id indicates SB (more reliable than context detection)
+                if button_id == 0 and is_first_to_act:
+                    should_add_action_2 = True
+                
+                if should_add_action_2:
+                    if 2 not in legal_actions:
+                        legal_actions.append(2)
+                        logger.info(f"🔧 [GET_GAME_STATE] Added action 2 (Raise to 3BB) to legal_actions - label: '{raise_label}', show: {should_show}, SB: {is_small_blind}, first: {is_first_to_act}, button_id: {button_id}")
+                    if 2 not in raw_legal_actions:
+                        raw_legal_actions.append(2)
+                        logger.info(f"🔧 [GET_GAME_STATE] Added action 2 (Raise to 3BB) to raw_legal_actions")
+                else:
+                    logger.debug(f"🔧 [GET_GAME_STATE] Not adding action 2 - label: '{raise_label}', show: {should_show}, SB: {is_small_blind}, first: {is_first_to_act}, button_id: {button_id}")
+            except Exception as e:
+                logger.warning(f"Failed to use ActionLabeling context for action 2 fix: {e}")
+                logger.exception(e)
+            
+            # Aggressive fallback: If preflop and user's turn, always add action 2 if not present
+            # This ensures "Raise to 3BB" is always available for SB first to act
+            if 2 not in legal_actions:
+                legal_actions.append(2)
+                logger.info(f"🔧 [GET_GAME_STATE] Aggressive fallback: Added action 2 to legal_actions (preflop, user turn, button_id={button_id})")
+            if 2 not in raw_legal_actions:
+                raw_legal_actions.append(2)
+                logger.info(f"🔧 [GET_GAME_STATE] Aggressive fallback: Added action 2 to raw_legal_actions (preflop, user turn, button_id={button_id})")
         
         # Calculate pot accurately using centralized pot calculator with reconstructed raised array
         # Create a modified raw_obs with the reconstructed raised array
@@ -945,13 +993,7 @@ class GameManager:
                 'all_cards': [public_cards[3]]
             })
 
-        # Add river deal
-        if stage >= 3 and len(public_cards) >= 5:
-            history.insert(0, {
-                'type': 'community_cards',
-                'stage': 'River',
-                'all_cards': [public_cards[4]]
-            })
+        # River deal removed from action history UI
     
     def _emit_blind_events(self, session_id, env):
         """Emit blind posting events immediately after game initialization"""
@@ -1160,6 +1202,9 @@ class GameManager:
             # Determine player name
             player_name = 'You' if winner_id == 0 else 'Opponent'
             
+            # Use correct verb form based on player name
+            verb = 'win' if winner_id == 0 else 'wins'
+            
             # Create and emit event with formatted label
             event = HandEvent(
                 stage='showdown',
@@ -1167,7 +1212,7 @@ class GameManager:
                 player_idx=winner_id,
                 amount=pot_bb,
                 pot=0.0,  # Pot is distributed, so 0 remaining
-                label=f'{player_name} wins pot of {pot_bb:.1f} BB'
+                label=f'{player_name} {verb} pot of {pot_bb:.1f} BB'
             )
             game['hand_events'].append(event)
             
@@ -2110,10 +2155,33 @@ class GameManager:
             game['current_state'] = next_state
             logger.info(f"🔍 [FOLD_WORKFLOW] Step 14a: Updated current_state")
             
-            next_player_id_safe = safe_int_convert(next_player_id, None)
-            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14b: next_player_id (raw)={next_player_id} (type: {type(next_player_id)}), converted={next_player_id_safe}")
-            game['current_player'] = next_player_id_safe
-            logger.info(f"🔍 [FOLD_WORKFLOW] Step 14c: Updated current_player={next_player_id_safe}")
+            # Check if game is over after the step
+            try:
+                is_over = safe_bool_convert(env.is_over())
+                logger.info(f"🔍 [FOLD_WORKFLOW] Step 14: Game over check after step: {is_over}")
+                
+                if is_over:
+                    # Game ended (e.g., player folded in heads-up)
+                    # Don't update current_player to None - keep it as the player who just acted
+                    # This prevents "Not player's turn" errors when the frontend checks game state
+                    logger.info(f"🔍 [FOLD_WORKFLOW] Step 14: Game is over, keeping current_player={current_player}")
+                    # current_player remains unchanged
+                else:
+                    # Game continues - update to next player
+                    next_player_id_safe = safe_int_convert(next_player_id, None)
+                    logger.info(f"🔍 [FOLD_WORKFLOW] Step 14b: next_player_id (raw)={next_player_id} (type: {type(next_player_id)}), converted={next_player_id_safe}")
+                    if next_player_id_safe is not None:
+                        game['current_player'] = next_player_id_safe
+                        logger.info(f"🔍 [FOLD_WORKFLOW] Step 14c: Updated current_player={next_player_id_safe}")
+                    else:
+                        logger.warning(f"⚠️ [FOLD_WORKFLOW] Step 14: next_player_id is None but game is not over, keeping current_player={current_player}")
+            except Exception as e:
+                logger.error(f"❌ [FOLD_WORKFLOW] Step 14: Error checking if game is over: {e}")
+                # Fallback: try to update current_player if next_player_id is valid
+                next_player_id_safe = safe_int_convert(next_player_id, None)
+                if next_player_id_safe is not None:
+                    game['current_player'] = next_player_id_safe
+                    logger.info(f"🔍 [FOLD_WORKFLOW] Step 14c (fallback): Updated current_player={next_player_id_safe}")
             
             # Get updated state info for logging
             next_raw_obs = next_state.get('raw_obs', {}) if next_state else {}
@@ -2124,7 +2192,8 @@ class GameManager:
             logger.info(f"🔍 [FOLD_WORKFLOW] Step 15: State after action - next_pot={next_pot}, next_public_cards count={len(next_public_cards)}, next_raised={next_raised}")
             
             # Log action result
-            logger.info(f"✅ [FOLD_WORKFLOW] Action processed - Session: {session_id}, Next: P{next_player_id_safe}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
+            current_player_after = game.get('current_player', 'Unknown')
+            logger.info(f"✅ [FOLD_WORKFLOW] Action processed - Session: {session_id}, Next: P{current_player_after}, Pot: {next_pot}, Cards: {len(next_public_cards)}")
 
             # Track decision for hand history
             logger.info(f"🔍 [FOLD_WORKFLOW] Step 16: Tracking decision - Player: {current_player}, Action: {action}")
@@ -2796,8 +2865,23 @@ def process_action():
                 'session_id': session_id
             }), 404
 
-        # Check if it's the human player's turn (player 0)
+        # Get game and check if it's over first
         game = game_manager.games[session_id]
+        env = game.get('env')
+        
+        # Check if game is over before checking turn
+        if env:
+            try:
+                is_over = safe_bool_convert(env.is_over())
+                if is_over:
+                    logger.warning(f"❌ [API] Game already over: {session_id}")
+                    # Return current game state instead of error
+                    game_state = game_manager.get_game_state(session_id)
+                    return jsonify(game_state), 200
+            except Exception as e:
+                logger.error(f"❌ [API] Error checking if game is over: {e}")
+
+        # Check if it's the human player's turn (player 0)
         current_player = game['current_player']
         if current_player != 0:
             logger.warning(f"❌ [API] Not player's turn: {session_id} (current: P{current_player})")

@@ -497,12 +497,22 @@ You have access to current game state and hand history when provided. Use this c
                 # Extract relevant game state
                 hand = game_context.get('hand', [])
                 board = game_context.get('public_cards', [])
+                stage = game_context.get('stage', 0)
                 pot = game_context.get('pot', 0)
                 big_blind = game_context.get('big_blind', 2)
                 all_chips = game_context.get('all_chips', [0, 0])
                 
                 # Format hand
                 hand_str = self._format_cards(hand) if hand else "Unknown"
+                
+                # Format board - filter out zeros if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                if board and isinstance(board, list):
+                    # If preflop (stage 0), filter out any zero values
+                    if stage == 0:
+                        board = [card for card in board if card != 0 and card != '0' and str(card) != '0']
+                    # Also filter if all cards are zeros (safety check)
+                    elif all(card == 0 or card == '0' or str(card) == '0' for card in board):
+                        board = []
                 
                 # Format board
                 board_str = self._format_cards(board) if board else "No board cards yet"
@@ -648,10 +658,18 @@ You have access to current game state and hand history when provided. Use this c
                                 hand_cards = decision.get('hand', [])
                                 board_cards = decision.get('public_cards', [])
 
-
                                 # Convert numpy types and map to readable format
                                 action = self._convert_numpy_type(action)
                                 stage = self._convert_numpy_type(stage)
+                                
+                                # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                                if board_cards and isinstance(board_cards, list):
+                                    stage_int = int(stage) if isinstance(stage, (int, float)) else 0
+                                    if stage_int == 0:
+                                        board_cards = [card for card in board_cards if card != 0 and card != '0' and str(card) != '0']
+                                    # Also filter if all cards are zeros (safety check)
+                                    elif all(card == 0 or card == '0' or str(card) == '0' for card in board_cards):
+                                        board_cards = []
 
                                 action_map = {0: "Fold", 1: "Check/Call", 2: "Raise ½ Pot", 3: "Raise Pot", 4: "All-In"}
                                 stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
@@ -732,6 +750,17 @@ You have access to current game state and hand history when provided. Use this c
 
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
+                                    stage = decision.get('stage', 0)
+                                    
+                                    # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                                    if board_cards and isinstance(board_cards, list):
+                                        stage_int_check = int(stage) if isinstance(stage, (int, float)) else 0
+                                        if stage_int_check == 0:
+                                            board_cards = [card for card in board_cards if card != 0 and card != '0' and str(card) != '0']
+                                        # Also filter if all cards are zeros (safety check)
+                                        elif all(card == 0 or card == '0' or str(card) == '0' for card in board_cards):
+                                            board_cards = []
+                                    
                                     # Extract position information from decision context
                                     decision_context = decision.get('context', {})
                                     position_parts = []
@@ -799,6 +828,17 @@ You have access to current game state and hand history when provided. Use this c
                                     
                                     hand_cards = decision.get('hand', [])
                                     board_cards = decision.get('public_cards', [])
+                                    stage = decision.get('stage', 0)
+                                    
+                                    # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                                    if board_cards and isinstance(board_cards, list):
+                                        stage_int = int(stage) if isinstance(stage, (int, float)) else 0
+                                        if stage_int == 0:
+                                            board_cards = [card for card in board_cards if card != 0 and card != '0' and str(card) != '0']
+                                        # Also filter if all cards are zeros (safety check)
+                                        elif all(card == 0 or card == '0' or str(card) == '0' for card in board_cards):
+                                            board_cards = []
+                                    
                                     # Extract position information from decision context
                                     decision_context = decision.get('context', {})
                                     position_parts = []
@@ -891,7 +931,18 @@ You have access to current game state and hand history when provided. Use this c
                 stage = decision.get('stage', 0)
                 hand_cards = decision.get('hand', [])
                 board_cards = decision.get('public_cards', [])
+                stage = decision.get('stage', 0)
                 pot = decision.get('pot', 0)
+                
+                # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                if board_cards and isinstance(board_cards, list):
+                    stage_int = int(stage) if isinstance(stage, (int, float)) else 0
+                    if stage_int == 0:
+                        board_cards = [card for card in board_cards if card != 0 and card != '0' and str(card) != '0']
+                    # Also filter if all cards are zeros (safety check)
+                    elif all(card == 0 or card == '0' or str(card) == '0' for card in board_cards):
+                        board_cards = []
+                
                 # Extract position information from decision context
                 decision_context = decision.get('context', {})
                 position_parts = []
@@ -970,7 +1021,8 @@ You have access to current game state and hand history when provided. Use this c
         Format card indices or strings to readable string.
 
         Args:
-            cards: List of card indices from RLCard (0-51) or card strings ('AH', '9S')
+            cards: List of card indices from RLCard (0-51) or card strings ('AH', '9S', 'DQ', 'HK')
+                  Supports both [Rank][Suit] format (e.g., 'AH', 'QD') and [Suit][Rank] format (e.g., 'DQ', 'HK')
 
         Returns:
             str: Formatted card string (e.g., "A♥ 9♠")
@@ -982,21 +1034,50 @@ You have access to current game state and hand history when provided. Use this c
         suit_names = ['s', 'h', 'd', 'c']  # spades, hearts, diamonds, clubs
         suit_symbols = ['♠', '♥', '♦', '♣']
 
+        # Define valid ranks and suits for format detection
+        valid_ranks = {'2', '3', '4', '5', '6', '7', '8', '9', 'T', 'J', 'Q', 'K', 'A'}
+        valid_suits = {'S', 'H', 'D', 'C'}
+        
+        # Maps for conversion
+        rank_map = {'2': 1, '3': 2, '4': 3, '5': 4, '6': 5, '7': 6, '8': 7, '9': 8, 'T': 9, 'J': 10, 'Q': 11, 'K': 12, 'A': 0}
+        suit_map = {'S': 0, 'H': 1, 'D': 2, 'C': 3}
+
         formatted_cards = []
         for card in cards:
             if isinstance(card, str):
-                # Handle string cards like 'AH', '9S' (Rank first, then Suit)
+                # Handle string cards - support both [Rank][Suit] and [Suit][Rank] formats
                 if len(card) == 2:
-                    rank_char, suit_char = card[0], card[1]
-                    # Map rank character to index
-                    rank_map = {'2': 1, '3': 2, '4': 3, '5': 4, '6': 5, '7': 6, '8': 7, '9': 8, 'T': 9, 'J': 10, 'Q': 11, 'K': 12, 'A': 0}
-                    suit_map = {'S': 0, 'H': 1, 'D': 2, 'C': 3}
-
-                    rank = rank_map.get(rank_char.upper(), 0)
-                    suit = suit_map.get(suit_char.upper(), 0)
+                    first_char = card[0].upper()
+                    second_char = card[1].upper()
+                    
+                    # Detect format: if first char is a suit, it's [Suit][Rank] format
+                    if first_char in valid_suits and second_char in valid_ranks:
+                        # Format: [Suit][Rank] (e.g., 'DQ' = Diamond Queen)
+                        suit_char = first_char
+                        rank_char = second_char
+                    elif first_char in valid_ranks and second_char in valid_suits:
+                        # Format: [Rank][Suit] (e.g., 'QD' = Queen of Diamonds)
+                        rank_char = first_char
+                        suit_char = second_char
+                    else:
+                        # Unknown format, try card2index mapping
+                        if hasattr(self, 'card2index') and card in self.card2index:
+                            card_index = self.card2index[card]
+                            rank = card_index % 13
+                            suit = card_index // 13
+                            formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
+                            continue
+                        else:
+                            # Fallback: use card string as-is
+                            formatted_cards.append(card)
+                            continue
+                    
+                    # Convert to rank and suit indices
+                    rank = rank_map.get(rank_char, 0)
+                    suit = suit_map.get(suit_char, 0)
                     formatted_cards.append(f"{rank_names[rank]}{suit_symbols[suit]}")
                 else:
-                    # Try to convert using card2index mapping
+                    # Try to convert using card2index mapping for other string formats
                     if hasattr(self, 'card2index') and card in self.card2index:
                         card_index = self.card2index[card]
                         rank = card_index % 13
@@ -1150,6 +1231,15 @@ You have access to current game state and hand history when provided. Use this c
                         board_cards = last_decision.get('public_cards', [])
                         pot = last_decision.get('pot', 0)
                         
+                        # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                        if board_cards and isinstance(board_cards, list):
+                            stage_int = int(stage) if isinstance(stage, (int, float)) else 0
+                            if stage_int == 0:
+                                board_cards = [card for card in board_cards if card != 0 and card != '0' and str(card) != '0']
+                            # Also filter if all cards are zeros (safety check)
+                            elif all(card == 0 or card == '0' or str(card) == '0' for card in board_cards):
+                                board_cards = []
+                        
                         # Map action to readable format
                         action_map = {0: "Fold", 1: "Check/Call", 2: "Raise ½ Pot", 3: "Raise Pot", 4: "All-In"}
                         stage_map = {0: "Preflop", 1: "Flop", 2: "Turn", 3: "River"}
@@ -1252,9 +1342,19 @@ You have access to current game state and hand history when provided. Use this c
                 
                 hand = game_context.get('hand', [])
                 board = game_context.get('public_cards', [])
+                stage = game_context.get('stage', 0)
                 pot = game_context.get('pot', 0)
                 big_blind = game_context.get('big_blind', 2)
                 all_chips = game_context.get('all_chips', [0, 0])
+                
+                # Filter out zeros from board if preflop (RLCard may return [0,0,0,0,0] instead of [])
+                if board and isinstance(board, list):
+                    stage_int = int(stage) if isinstance(stage, (int, float)) else 0
+                    if stage_int == 0:
+                        board = [card for card in board if card != 0 and card != '0' and str(card) != '0']
+                    # Also filter if all cards are zeros (safety check)
+                    elif all(card == 0 or card == '0' or str(card) == '0' for card in board):
+                        board = []
                 
                 if hand:
                     hand_str = self._format_cards(hand)
