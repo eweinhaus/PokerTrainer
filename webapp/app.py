@@ -232,17 +232,18 @@ class GameManager:
 
             # Create wrapper functions that properly handle self parameter
             def patched_init_game_wrapper(self):
-                # FIX: Ensure dealer_id is randomly selected using Python's random module
+                # FIX: Ensure dealer_id is randomly selected using secrets module
                 # This fixes the issue where deployment always defaults to the same dealer
-                # because np_random might not be properly seeded in deployment environments
-                import random
+                # because random module might not be properly seeded in deployment environments
+                # secrets module uses OS-provided entropy and doesn't require seeding
+                import secrets
                 
                 # Set dealer_id to a random value BEFORE calling original_init_game
                 # The original code checks: if dealer_id is None, use np_random.choice, else use modulo
                 # By setting it to a non-None value, we bypass the np_random.choice call
-                random_dealer_id = random.choice(range(self.num_players))
+                random_dealer_id = secrets.choice(range(self.num_players))
                 self.dealer_id = random_dealer_id
-                logger.info(f"🎲 [DEALER_FIX] Set dealer_id to {self.dealer_id} using Python random module (before init_game)")
+                logger.info(f"🎲 [DEALER_FIX] Set dealer_id to {self.dealer_id} using secrets module (before init_game)")
                 
                 # Call original init_game (it will use our dealer_id and apply modulo if needed)
                 result = original_init_game()
