@@ -4,6 +4,7 @@ This provides minimal functionality to allow the app to start.
 """
 
 import random
+import secrets
 
 class Action:
     """Mock Action class matching RLCard"""
@@ -31,7 +32,9 @@ class MockGame:
             MockPlayer(hand2)
         ]
         self.dealer = MockDealer()
-        self.dealer_id = 0
+        # Randomly assign dealer position using secrets module for proper randomness
+        # In heads-up: dealer is BB, non-dealer is SB
+        self.dealer_id = secrets.choice([0, 1])
 
     def _deal_random_hands(self):
         """Deal two random hole cards for each player"""
@@ -54,6 +57,25 @@ class MockEnvironment:
         """Create initial game state with random cards and proper stacks"""
         # Deal random hands
         hand1, hand2 = self.game._deal_random_hands()
+        
+        # Get dealer_id from game (randomly assigned in MockGame.__init__)
+        dealer_id = self.game.dealer_id
+        # In heads-up: dealer is BB, non-dealer is SB
+        sb_player = 1 - dealer_id  # Non-dealer is SB
+        bb_player = dealer_id      # Dealer is BB
+        
+        # Set raised amounts based on actual positions
+        raised = [0, 0]
+        raised[sb_player] = 1  # SB posts 1
+        raised[bb_player] = 2  # BB posts 2
+        
+        # Set chip amounts (100 BB stacks minus blinds)
+        all_chips = [0, 0]
+        all_chips[sb_player] = 99  # 100 - 1 (SB)
+        all_chips[bb_player] = 98  # 100 - 2 (BB)
+        
+        # In heads-up preflop, SB acts first
+        current_player = sb_player
 
         return {
             'stage': 0,  # Preflop
@@ -61,9 +83,9 @@ class MockEnvironment:
             'big_blind': 2,
             'public_cards': [],
             'hands': [hand1, hand2],  # Random hands instead of hardcoded AA
-            'raised': [1, 2],  # SB: 1, BB: 2
-            'all_chips': [99, 98],  # 50 BB stacks minus blinds (100-1=99, 100-2=98)
-            'current_player': 0
+            'raised': raised,  # Based on actual dealer position
+            'all_chips': all_chips,  # Based on actual dealer position
+            'current_player': current_player  # SB acts first
         }
 
     def set_agents(self, agents):
@@ -75,7 +97,10 @@ class MockEnvironment:
         self.game = MockGame()  # Create new game with new random cards
         self.game_state = self._create_initial_game_state()
 
-        # Return state from player 0's perspective
+        # Get current player (SB acts first in heads-up preflop)
+        current_player = self.game_state['current_player']
+
+        # Return state from player 0's perspective (always)
         state = {
             'raw_obs': {
                 'hand': self.game_state['hands'][0],  # Player 0's hand
@@ -90,7 +115,7 @@ class MockEnvironment:
             },
             'raw_legal_actions': [Action.FOLD, Action.CHECK_CALL, Action.RAISE_HALF_POT, Action.RAISE_POT, Action.ALL_IN]
         }
-        return state, 0  # state, current_player
+        return state, current_player  # state, current_player (SB in heads-up)
 
     def step(self, action, raw_action=False):
         """Take an action and return new state"""

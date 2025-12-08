@@ -624,7 +624,6 @@ class GameManager:
         # Priority 1: Use remaining chips from player objects if available and valid
         if remaining_chips and len(remaining_chips) >= 2 and (remaining_chips[0] > 0 or remaining_chips[1] > 0):
             stakes = [int(remaining_chips[0]), int(remaining_chips[1])]
-            logger.info(f"💰 [STACKS] Using remaining_chips from player objects: {stakes}")
         # Priority 2: Use stakes from raw_obs if available and valid
         elif raw_stakes and isinstance(raw_stakes, list) and len(raw_stakes) >= 2 and not (raw_stakes[0] == 0 and raw_stakes[1] == 0):
             stakes = [int(raw_stakes[0]), int(raw_stakes[1])]
